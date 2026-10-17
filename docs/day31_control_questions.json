@@ -1,0 +1,7 @@
+{
+  "questions": [
+    {"id": "day31-structure", "question": "Где реализованы HTTP API, провайдер DeepSeek, RAG и JSON-хранилище?", "expected_keywords": ["app.py", "agent.py", "document_index", "storage.py"]},
+    {"id": "day31-schema", "question": "Как связаны сообщения: parent_id и exchange_id?", "expected_keywords": ["parent_id", "exchange_id"]},
+    {"id": "day31-rag", "question": "Где хранятся чанки RAG и как обновить документацию проекта?", "expected_keywords": ["rag_index.sqlite3", "README", "docs"]}
+  ]
+}

@@ -1,6 +1,8 @@
 const $ = (selector) => document.querySelector(selector);
 
 const ui = {
+  workspaceSelect: $("#workspace-select"), workspaceSource: $("#workspace-source"), workspaceChatLabel: $("#workspace-chat-label"),
+  newProjectKind: $("#new-project-kind"), newProjectSource: $("#new-project-source"),
   newChat: $("#new-chat"), newProject: $("#new-project"), newProjectForm: $("#new-project-form"), newProjectName: $("#new-project-name"),
   newProjectCancel: $("#new-project-cancel"), conversationList: $("#conversation-list"), sidebarProjectStatus: $("#sidebar-project-status"), importButton: $("#import-button"), importFile: $("#import-file"),
   profileSelect: $("#profile-select"), profileEdit: $("#profile-edit"), profileCreate: $("#profile-create"), profileDialog: $("#profile-dialog"),
@@ -17,12 +19,6 @@ const ui = {
   mcpDisableAll: $("#mcp-disable-all"), mcpEnableAll: $("#mcp-enable-all"),
   mcpStart: $("#mcp-start"), mcpTools: $("#mcp-tools"), mcpStop: $("#mcp-stop"),
   mcpStatus: $("#mcp-status"), mcpMessage: $("#mcp-message"), mcpDetails: $("#mcp-details"), mcpToolList: $("#mcp-tool-list"),
-  weatherMcpStart: $("#weather-mcp-start"), weatherMcpTools: $("#weather-mcp-tools"), weatherMcpStop: $("#weather-mcp-stop"),
-  weatherMcpStatus: $("#weather-mcp-status"), weatherMcpMessage: $("#weather-mcp-message"), weatherMcpDetails: $("#weather-mcp-details"), weatherMcpToolList: $("#weather-mcp-tool-list"),
-  mediawikiMcpStart: $("#mediawiki-mcp-start"), mediawikiMcpTools: $("#mediawiki-mcp-tools"), mediawikiMcpStop: $("#mediawiki-mcp-stop"),
-  mediawikiMcpStatus: $("#mediawiki-mcp-status"), mediawikiMcpMessage: $("#mediawiki-mcp-message"), mediawikiMcpDetails: $("#mediawiki-mcp-details"), mediawikiMcpToolList: $("#mediawiki-mcp-tool-list"),
-  worldbankMcpStart: $("#worldbank-mcp-start"), worldbankMcpTools: $("#worldbank-mcp-tools"), worldbankMcpStop: $("#worldbank-mcp-stop"),
-  worldbankMcpStatus: $("#worldbank-mcp-status"), worldbankMcpMessage: $("#worldbank-mcp-message"), worldbankMcpDetails: $("#worldbank-mcp-details"), worldbankMcpToolList: $("#worldbank-mcp-tool-list"),
   contextMode: $("#context-mode"), contextStatus: $("#context-status"), contextMetrics: $("#context-metrics"),
   taskDescription: $("#task-description"), taskStage: $("#task-stage"), taskCurrentStep: $("#task-current-step"),
   taskControlDisable: $("#task-control-disable"), taskControlEnable: $("#task-control-enable"), taskControlMessage: $("#task-control-message"),
@@ -65,8 +61,7 @@ const ui = {
   schedulerEditId: $("#scheduler-edit-id"), schedulerEditorTitle: $("#scheduler-editor-title"), schedulerTaskTitle: $("#scheduler-task-title"),
   schedulerTaskPrompt: $("#scheduler-task-prompt"), schedulerType: $("#scheduler-type"), schedulerRunAt: $("#scheduler-run-at"),
   schedulerDelay: $("#scheduler-delay"), schedulerInterval: $("#scheduler-interval"), schedulerIntervalLabel: $("#scheduler-interval-label"),
-  schedulerUseWeather: $("#scheduler-use-weather"), schedulerWeatherTools: $("#scheduler-weather-tools"), schedulerError: $("#scheduler-error"),
-  schedulerReset: $("#scheduler-reset"), schedulerSave: $("#scheduler-save"), schedulerShowTools: $("#scheduler-show-tools"),
+  schedulerError: $("#scheduler-error"), schedulerReset: $("#scheduler-reset"), schedulerSave: $("#scheduler-save"), schedulerShowTools: $("#scheduler-show-tools"),
   schedulerMcpTools: $("#scheduler-mcp-tools"), schedulerReadAll: $("#scheduler-read-all"), schedulerTaskList: $("#scheduler-task-list"),
   schedulerRunsCount: $("#scheduler-runs-count"), schedulerRunList: $("#scheduler-run-list"),
   chatViewButton: $("#chat-view-button"), ragViewButton: $("#rag-view-button"), ragPanel: $("#rag-panel"),
@@ -112,6 +107,8 @@ let audioChunks = [];
 let recordingTimer = null;
 let voiceBusy = false;
 let voiceSubmitAfterTranscription = false;
+let managedServers = null;
+let managedBusy = false;
 let mcpControlState = { enabled: true, updated_at: null };
 let mcpControlBusy = false;
 let taskControlState = { enabled: true, updated_at: null };
@@ -119,13 +116,6 @@ let taskControlBusy = false;
 let mcpState = { phase: "stopped", connected: false, message: "MCP-сервер не запущен.", server: {} };
 let mcpBusy = false;
 let mcpActiveAction = null;
-let weatherMcpState = { phase: "stopped", connected: false, message: "MCP-сервер не запущен.", server: {} };
-let weatherMcpBusy = false;
-let weatherMcpActiveAction = null;
-const orchestrationMcp = {
-  mediawiki: { label: "MediaWiki", state: { phase: "stopped", connected: false, message: "MCP-сервер не запущен.", server: {} }, busy: false, action: null },
-  worldbank: { label: "World Bank", state: { phase: "stopped", connected: false, message: "MCP-сервер не запущен.", server: {} }, busy: false, action: null },
-};
 let invariantContext = { bundle: { layers: {}, rules: [] }, sets: { user: [], project: [], task: [] } };
 let schedulerState = { scheduler: {}, mcp: {}, tasks: [], runs: [], summary: { unread_count: 0 } };
 let ragState = null;
@@ -139,19 +129,21 @@ start().catch(showFatal);
 async function start() {
   const data = await api("/api/state");
   appState = { conversations: data.conversations, projects: data.projects || [], profiles: data.profiles || [], activeProfileId: data.active_profile_id, presets: data.presets, defaults: data.default_settings, provider: data.provider };
+  appState.activeWorkspaceProjectId = data.active_workspace_project_id || null;
+  appState.selfWorkspaceRoot = data.self_workspace_root || "";
+  renderWorkspaceSelector();
   renderProfileSelect();
   populateModels();
   renderPresetSelect();
   applySettings(appState.defaults);
   renderConversationList();
   await refreshTaskControlStatus().catch((error) => renderTaskControlError(error));
-  if (appState.conversations.length) await openConversation(appState.conversations[0].id);
+  const initialConversation = appState.conversations.find(c => (c.project_id || null) === (appState.activeWorkspaceProjectId || null));
+  if (initialConversation) await openConversation(initialConversation.id);
   else renderEmptyWorkspace();
   startVoiceStatusPolling();
   await refreshMcpControlStatus().catch((error) => renderMcpControlError(error));
   refreshMcpStatus().catch((error) => renderMcpError(error));
-  refreshWeatherMcpStatus().catch((error) => renderWeatherMcpError(error));
-  Object.keys(orchestrationMcp).forEach((name) => refreshOrchestrationMcpStatus(name).catch((error) => renderOrchestrationMcpError(name, error)));
   refreshSchedulerState().catch(() => {});
   window.setInterval(() => refreshSchedulerState().catch(() => {}), 10000);
 }
@@ -224,8 +216,6 @@ function renderMcpControlState() {
   ui.mcpDisableAll.textContent = mcpControlBusy && enabled ? "Отключаем…" : "Отключить все MCP";
   ui.mcpEnableAll.textContent = mcpControlBusy && !enabled ? "Разрешаем…" : "Разрешить MCP";
   renderMcpState();
-  renderWeatherMcpState();
-  Object.keys(orchestrationMcp).forEach(renderOrchestrationMcpState);
   renderScheduler();
 }
 
@@ -237,19 +227,21 @@ function renderMcpControlError(error) {
 async function setMcpControl(enabled) {
   if (mcpControlBusy) return;
   mcpControlBusy = true;
+  $("#mcp-manager-error").textContent = "";
   renderMcpControlState();
   try {
     const action = enabled ? "enable" : "disable";
     const data = await api(`/api/mcp-control/${action}`, { method: "POST", body: {} });
     mcpControlState = data.control;
+    if (!enabled) ui.mcpToolList.replaceChildren();
+    if (Object.keys(data.errors || {}).length) showManagedError(new Error(Object.values(data.errors).join("; ")));
     await Promise.all([
+      refreshManagedServers(),
       refreshMcpStatus(),
-      refreshWeatherMcpStatus(),
-      ...Object.keys(orchestrationMcp).map(refreshOrchestrationMcpStatus),
       refreshSchedulerState(),
     ]);
   } catch (error) {
-    renderMcpControlError(error);
+    showManagedError(error);
   } finally {
     mcpControlBusy = false;
     renderMcpControlState();
@@ -269,7 +261,7 @@ function renderScheduler() {
   const running = schedulerState.scheduler?.running === true;
   ui.schedulerRuntimeStatus.textContent = running ? "Работает" : "Остановлен";
   ui.schedulerRuntimeStatus.className = `mcp-status ${running ? "running" : "stopped"}`;
-  ui.schedulerShowTools.disabled = !mcpAllowed();
+  ui.schedulerShowTools.disabled = false;
   const counts = schedulerState.summary || {};
   const cards = [
     ["Заданий", counts.tasks_total || 0],
@@ -347,8 +339,6 @@ function resetSchedulerEditor() {
   ui.schedulerEditId.value = ""; ui.schedulerEditorTitle.textContent = "Новое задание";
   ui.schedulerTaskTitle.value = ""; ui.schedulerTaskPrompt.value = ""; ui.schedulerType.value = "once";
   ui.schedulerType.disabled = false; ui.schedulerRunAt.value = ""; ui.schedulerDelay.value = ""; ui.schedulerInterval.value = "60";
-  ui.schedulerUseWeather.checked = false; ui.schedulerWeatherTools.hidden = true;
-  ui.schedulerWeatherTools.querySelectorAll("input").forEach((input) => { input.checked = false; });
   ui.schedulerIntervalLabel.hidden = true; ui.schedulerSave.textContent = "Добавить"; ui.schedulerError.textContent = "";
 }
 
@@ -358,18 +348,11 @@ function editScheduledTask(task) {
   ui.schedulerType.disabled = true; ui.schedulerRunAt.value = task.next_run_at ? task.next_run_at.slice(0, 16) : "";
   ui.schedulerDelay.value = ""; ui.schedulerInterval.value = task.interval_minutes || 60;
   ui.schedulerIntervalLabel.hidden = task.schedule_type !== "interval";
-  ui.schedulerUseWeather.checked = (task.mcp_servers || []).includes("open-meteo");
-  ui.schedulerWeatherTools.hidden = !ui.schedulerUseWeather.checked;
-  ui.schedulerWeatherTools.querySelectorAll("input").forEach((input) => { input.checked = (task.allowed_tools || []).includes(input.value); });
   ui.schedulerSave.textContent = "Сохранить"; ui.schedulerError.textContent = "";
 }
 
 function schedulerDependencyPayload() {
-  if (!ui.schedulerUseWeather.checked) return { mcp_servers: [], allowed_tools: [] };
-  return {
-    mcp_servers: ["open-meteo"],
-    allowed_tools: [...ui.schedulerWeatherTools.querySelectorAll("input:checked")].map((input) => input.value),
-  };
+  return { mcp_servers: [], allowed_tools: [] };
 }
 
 async function saveScheduledTask() {
@@ -429,171 +412,6 @@ async function markSchedulerNotificationsRead() {
   await refreshSchedulerState();
 }
 
-async function refreshWeatherMcpStatus() {
-  const data = await api("/api/weather-mcp/status");
-  weatherMcpState = data.mcp;
-  renderWeatherMcpState();
-}
-
-function renderWeatherMcpState() {
-  const labels = { stopped: "Остановлен", starting: "Запуск…", running: "Подключён", stopping: "Остановка…", error: "Ошибка" };
-  const phase = weatherMcpState.phase || "stopped";
-  ui.weatherMcpStatus.textContent = labels[phase] || phase;
-  ui.weatherMcpStatus.className = `mcp-status ${phase}`;
-  ui.weatherMcpMessage.textContent = weatherMcpState.message || "";
-  ui.weatherMcpMessage.className = `mcp-message${weatherMcpState.error ? " error" : ""}`;
-  const active = weatherMcpState.connected === true;
-  ui.weatherMcpStart.disabled = !mcpAllowed() || weatherMcpBusy || active || phase === "starting" || phase === "stopping";
-  ui.weatherMcpTools.disabled = !mcpAllowed() || weatherMcpBusy || !active;
-  ui.weatherMcpStop.disabled = weatherMcpBusy || !active;
-  ui.weatherMcpStart.textContent = weatherMcpActiveAction === "start" ? "Запускаем…" : "Запустить MCP";
-  ui.weatherMcpTools.textContent = weatherMcpActiveAction === "tools" ? "Получаем…" : "Получить инструменты";
-  ui.weatherMcpStop.textContent = weatherMcpActiveAction === "stop" ? "Останавливаем…" : "Остановить MCP";
-  const details = [
-    ["Сервер", weatherMcpState.server?.name], ["Версия сервера", weatherMcpState.server?.version],
-    ["Версия протокола", weatherMcpState.protocol_version], ["Инструментов", weatherMcpState.tool_count],
-  ].filter(([, value]) => value !== null && value !== undefined && value !== "");
-  ui.weatherMcpDetails.replaceChildren();
-  details.forEach(([label, value]) => {
-    const term = document.createElement("dt"); term.textContent = label;
-    const description = document.createElement("dd"); description.textContent = String(value);
-    ui.weatherMcpDetails.append(term, description);
-  });
-  ui.weatherMcpDetails.hidden = details.length === 0;
-}
-
-function renderWeatherMcpTools(tools) {
-  ui.weatherMcpToolList.replaceChildren();
-  (tools || []).forEach((tool) => {
-    const item = document.createElement("details"); item.className = "mcp-tool";
-    const heading = document.createElement("summary"); heading.textContent = tool.title ? `${tool.name} · ${tool.title}` : tool.name;
-    const description = document.createElement("p"); description.textContent = tool.description || "Описание не предоставлено.";
-    const schema = document.createElement("pre"); schema.textContent = JSON.stringify(tool.input_schema || {}, null, 2);
-    item.append(heading, description, schema); ui.weatherMcpToolList.append(item);
-  });
-}
-
-function renderWeatherMcpError(error) {
-  if (error.data?.mcp) weatherMcpState = error.data.mcp;
-  weatherMcpState = { ...weatherMcpState, error: error.message || String(error), message: error.message || String(error) };
-  renderWeatherMcpState();
-}
-
-async function runWeatherMcpAction(action) {
-  if (weatherMcpBusy) return;
-  weatherMcpBusy = true; weatherMcpActiveAction = action;
-  if (action === "start") {
-    weatherMcpState = { ...weatherMcpState, phase: "starting", message: "Запускаем Open‑Meteo MCP Server…", error: null };
-    ui.weatherMcpToolList.replaceChildren();
-  } else if (action === "tools") {
-    weatherMcpState = { ...weatherMcpState, message: "Получаем список инструментов…", error: null };
-  } else {
-    weatherMcpState = { ...weatherMcpState, phase: "stopping", message: "Останавливаем MCP-сервер…", error: null };
-  }
-  renderWeatherMcpState();
-  try {
-    const method = action === "tools" ? "GET" : "POST";
-    const data = await api(`/api/weather-mcp/${action}`, { method });
-    weatherMcpState = data.mcp;
-    if (data.mcp.tools) renderWeatherMcpTools(data.mcp.tools);
-    if (action === "stop") ui.weatherMcpToolList.replaceChildren();
-  } catch (error) {
-    renderWeatherMcpError(error);
-  } finally {
-    weatherMcpBusy = false; weatherMcpActiveAction = null; renderWeatherMcpState();
-  }
-}
-
-function orchestrationMcpUi(name) {
-  const prefix = name === "mediawiki" ? "mediawikiMcp" : "worldbankMcp";
-  return {
-    start: ui[`${prefix}Start`], tools: ui[`${prefix}Tools`], stop: ui[`${prefix}Stop`],
-    status: ui[`${prefix}Status`], message: ui[`${prefix}Message`], details: ui[`${prefix}Details`],
-    toolList: ui[`${prefix}ToolList`],
-  };
-}
-
-async function refreshOrchestrationMcpStatus(name) {
-  const data = await api(`/api/orchestration-mcp/${name}/status`);
-  orchestrationMcp[name].state = data.mcp;
-  renderOrchestrationMcpState(name);
-}
-
-function renderOrchestrationMcpState(name) {
-  const record = orchestrationMcp[name];
-  const elements = orchestrationMcpUi(name);
-  const state = record.state;
-  const labels = { stopped: "Остановлен", starting: "Запуск…", running: "Подключён", stopping: "Остановка…", error: "Ошибка" };
-  const phase = state.phase || "stopped";
-  elements.status.textContent = labels[phase] || phase;
-  elements.status.className = `mcp-status ${phase}`;
-  elements.message.textContent = state.message || "";
-  elements.message.className = `mcp-message${state.error ? " error" : ""}`;
-  const active = state.connected === true;
-  elements.start.disabled = !mcpAllowed() || record.busy || active || phase === "starting" || phase === "stopping";
-  elements.tools.disabled = !mcpAllowed() || record.busy || !active;
-  elements.stop.disabled = record.busy || !active;
-  elements.start.textContent = record.action === "start" ? "Запускаем…" : "Запустить MCP";
-  elements.tools.textContent = record.action === "tools" ? "Получаем…" : "Получить инструменты";
-  elements.stop.textContent = record.action === "stop" ? "Останавливаем…" : "Остановить MCP";
-  const details = [
-    ["Сервер", state.server?.name], ["Версия сервера", state.server?.version],
-    ["Версия протокола", state.protocol_version], ["Инструментов", state.tool_count],
-  ].filter(([, value]) => value !== null && value !== undefined && value !== "");
-  elements.details.replaceChildren();
-  details.forEach(([label, value]) => {
-    const term = document.createElement("dt"); term.textContent = label;
-    const description = document.createElement("dd"); description.textContent = String(value);
-    elements.details.append(term, description);
-  });
-  elements.details.hidden = details.length === 0;
-}
-
-function renderOrchestrationMcpTools(name, tools) {
-  const container = orchestrationMcpUi(name).toolList;
-  container.replaceChildren();
-  (tools || []).forEach((tool) => {
-    const item = document.createElement("details"); item.className = "mcp-tool";
-    const heading = document.createElement("summary"); heading.textContent = tool.title ? `${tool.name} · ${tool.title}` : tool.name;
-    const description = document.createElement("p"); description.textContent = tool.description || "Описание не предоставлено.";
-    const schema = document.createElement("pre"); schema.textContent = JSON.stringify(tool.input_schema || {}, null, 2);
-    item.append(heading, description, schema); container.append(item);
-  });
-}
-
-function renderOrchestrationMcpError(name, error) {
-  const record = orchestrationMcp[name];
-  if (error.data?.mcp) record.state = error.data.mcp;
-  record.state = { ...record.state, error: error.message || String(error), message: error.message || String(error) };
-  renderOrchestrationMcpState(name);
-}
-
-async function runOrchestrationMcpAction(name, action) {
-  const record = orchestrationMcp[name];
-  if (record.busy) return;
-  record.busy = true; record.action = action;
-  if (action === "start") {
-    record.state = { ...record.state, phase: "starting", message: `Запускаем ${record.label} MCP Server…`, error: null };
-    orchestrationMcpUi(name).toolList.replaceChildren();
-  } else if (action === "tools") {
-    record.state = { ...record.state, message: "Получаем список инструментов…", error: null };
-  } else {
-    record.state = { ...record.state, phase: "stopping", message: "Останавливаем MCP-сервер…", error: null };
-  }
-  renderOrchestrationMcpState(name);
-  try {
-    const method = action === "tools" ? "GET" : "POST";
-    const data = await api(`/api/orchestration-mcp/${name}/${action}`, { method });
-    record.state = data.mcp;
-    if (data.mcp.tools) renderOrchestrationMcpTools(name, data.mcp.tools);
-    if (action === "stop") orchestrationMcpUi(name).toolList.replaceChildren();
-  } catch (error) {
-    renderOrchestrationMcpError(name, error);
-  } finally {
-    record.busy = false; record.action = null; renderOrchestrationMcpState(name);
-  }
-}
-
 async function refreshMcpStatus() {
   const data = await api("/api/mcp/status");
   mcpState = data.mcp;
@@ -608,9 +426,9 @@ function renderMcpState() {
   ui.mcpMessage.textContent = mcpState.message || "";
   ui.mcpMessage.className = `mcp-message${mcpState.error ? " error" : ""}`;
   const active = mcpState.connected === true;
-  ui.mcpStart.disabled = !mcpAllowed() || mcpBusy || active || phase === "starting" || phase === "stopping";
-  ui.mcpTools.disabled = !mcpAllowed() || mcpBusy || !active;
-  ui.mcpStop.disabled = mcpBusy || !active;
+  ui.mcpStart.disabled = !managedServerAllowed("filesystem") || managedBusy || mcpBusy || active || phase === "starting" || phase === "stopping";
+  ui.mcpTools.disabled = !managedServerAllowed("filesystem") || managedBusy || mcpBusy || !active;
+  ui.mcpStop.disabled = managedBusy || mcpBusy || !active;
   ui.mcpStart.textContent = mcpActiveAction === "start" ? "Запускаем…" : "Запустить MCP";
   ui.mcpTools.textContent = mcpActiveAction === "tools" ? "Получаем…" : "Получить инструменты";
   ui.mcpStop.textContent = mcpActiveAction === "stop" ? "Останавливаем…" : "Остановить MCP";
@@ -650,7 +468,7 @@ function renderMcpError(error) {
 }
 
 async function runMcpAction(action) {
-  if (mcpBusy) return;
+  if (mcpBusy || managedBusy) return;
   mcpBusy = true;
   mcpActiveAction = action;
   if (action === "start") {
@@ -668,6 +486,7 @@ async function runMcpAction(action) {
     mcpState = data.mcp;
     if (action === "tools") renderMcpTools(data.mcp.tools);
     if (action === "stop") ui.mcpToolList.replaceChildren();
+    await refreshManagedServers();
   } catch (error) {
     renderMcpError(error);
   } finally {
@@ -702,7 +521,11 @@ function populateModels() {
   appState.provider.models.forEach((model) => ui.model.add(new Option(model, model)));
 }
 
-async function createConversation(projectId = null) {
+function preferredWorkspaceConversation() {
+  return appState.conversations.find(c => (c.project_id || null) === (appState.activeWorkspaceProjectId || null));
+}
+
+async function createConversation(projectId = appState.activeWorkspaceProjectId || null) {
   const data = await api("/api/conversations", { method: "POST", body: { title: "Новый диалог", project_id: projectId } });
   await refreshState();
   await openConversation(data.conversation.id);
@@ -716,6 +539,9 @@ async function refreshState() {
   appState.profiles = data.profiles || [];
   appState.activeProfileId = data.active_profile_id;
   appState.presets = data.presets;
+  appState.activeWorkspaceProjectId = data.active_workspace_project_id || null;
+  appState.selfWorkspaceRoot = data.self_workspace_root || "";
+  renderWorkspaceSelector();
   renderConversationList();
   renderProfileSelect();
   renderPresetSelect();
@@ -755,7 +581,7 @@ async function changeActiveProfile() {
   activeConversation = null;
   await refreshState();
   await refreshSchedulerState();
-  if (appState.conversations.length) await openConversation(appState.conversations[0].id);
+  if (preferredWorkspaceConversation()) await openConversation(preferredWorkspaceConversation().id);
   else renderEmptyWorkspace();
 }
 
@@ -800,13 +626,27 @@ async function saveProfile() {
     const data = await api(id ? `/api/profiles/${id}` : "/api/profiles", { method: id ? "PATCH" : "POST", body: profileFormBody() });
     if (!id) await api("/api/profiles/active", { method: "PATCH", body: { profile_id: data.profile.id } });
     ui.profileDialog.close(); activeConversation = null; await refreshState();
-    if (appState.conversations.length) await openConversation(appState.conversations[0].id); else renderEmptyWorkspace();
+    if (preferredWorkspaceConversation()) await openConversation(preferredWorkspaceConversation().id); else renderEmptyWorkspace();
   } catch (error) { ui.profileError.textContent = error.message; }
 }
 
 async function openConversation(id) {
+  if (sending && activeConversation?.id !== id) throw new Error("Дождитесь завершения текущего запроса перед переключением проекта или чата.");
   const data = await api(`/api/conversations/${id}`);
   activeConversation = data.conversation;
+  await api("/api/workspace/select", { method: "POST", body: { project_id: activeConversation.project_id || null } });
+  appState.activeWorkspaceProjectId = activeConversation.project_id || null;
+  renderWorkspaceSelector();
+  ragState = null; ragLoadedRunId = null;
+  ragEvaluationState = {questions: [], items: []};
+  renderRagEvaluationState();
+  [ui.ragFixedChunks, ui.ragStructuralChunks, ui.ragFixedDetail, ui.ragStructuralDetail,
+    ui.ragFixedResults, ui.ragStructuralResults, ui.ragWithoutAnswer, ui.ragWithAnswer,
+    ui.ragCompareSources, ui.ragPipelineResults, ui.ragEvidenceResult, ui.mcpToolList]
+    .filter(Boolean).forEach(el => el.replaceChildren());
+  window.clearTimeout(ragPollTimer);
+  await refreshMcpStatus().catch(renderMcpError);
+  if ($("#mcp-manager-dialog").open) await refreshManagedServers().catch(showManagedError);
   enableConversationControls();
   ui.chatTitle.value = activeConversation.title;
   renderMessages();
@@ -820,6 +660,12 @@ async function openConversation(id) {
     ui.presetSelect.value = selectedPresetId;
   }
   updateSettingsSummary();
+  setWorkspaceMenu(false);
+}
+
+function setWorkspaceMenu(open) {
+  document.body.classList.toggle("workspace-nav-open", open);
+  document.querySelectorAll("[data-workspace-menu]").forEach(el => el.setAttribute("aria-expanded", String(open)));
 }
 
 function renderConversationList() {
@@ -912,11 +758,52 @@ async function extractHistoryMemory(conversationId, control) {
 
 async function createSidebarProject(event) {
   event.preventDefault();
-  const data = await api("/api/projects", { method: "POST", body: {
-    name: ui.newProjectName.value, description: "", create_dialog: true,
-  }});
-  ui.newProjectForm.hidden = true; ui.newProjectName.value = "";
-  await refreshState(); await openConversation(data.conversation.id); ui.input.focus();
+  if (sending) throw new Error("Дождитесь завершения текущего запроса перед подключением проекта.");
+  const controls = [...ui.newProjectForm.querySelectorAll("input, select, button")];
+  const body = { name: ui.newProjectName.value, description: "", create_dialog: true,
+    workspace: { kind: ui.newProjectKind.value, source: ui.newProjectSource.value } };
+  controls.forEach(el => { el.disabled = true; });
+  ui.sidebarProjectStatus.textContent = body.workspace.kind === "github" ? "Скачиваем репозиторий GitHub…" : "Подключаем папку проекта…";
+  try {
+    const data = await api("/api/projects", { method: "POST", body });
+    ui.newProjectForm.hidden = true; ui.newProjectName.value = ""; ui.newProjectSource.value = "";
+    await refreshState(); await openConversation(data.conversation.id);
+    ui.sidebarProjectStatus.textContent = "Проект подключён. Дождитесь индексации документации.";
+    setWorkspaceView("rag");
+  } catch (error) {
+    ui.sidebarProjectStatus.textContent = error.message || String(error);
+    throw error;
+  } finally { controls.forEach(el => { el.disabled = false; }); }
+}
+
+function renderWorkspaceSelector() {
+  const projects = appState.projects.filter(p => p.workspace);
+  ui.workspaceSelect.replaceChildren(new Option("Сам ассистент", ""), ...projects.map(p => new Option(p.name, p.id)));
+  const project = projects.find(p => p.id === appState.activeWorkspaceProjectId);
+  ui.workspaceSelect.value = project?.id || "";
+  ui.workspaceSource.textContent = project ? (project.workspace.url || project.workspace.root) : (appState.selfWorkspaceRoot || "Собственные исходники");
+  ui.workspaceChatLabel.textContent = `Рабочий проект: ${project?.name || "Сам ассистент"}`;
+  const scope = document.querySelector("#filesystem-scope-note");
+  if (scope) scope.textContent = project
+    ? `Рабочая папка файловых инструментов: ${project.workspace.root}. Явный экспорт сохраняется в reports. Изменение исходников автоматически не запускается.`
+    : "Сервер видит папку workspace ассистента. При явной просьбе сохранить отчёт доступен write_file для workspace/reports.";
+  ui.chatRagEnabled.disabled = Boolean(project);
+  if (project) {
+    ui.chatRagEnabled.checked = true; ui.chatRagMode.value = "baseline"; ui.chatRagVerified.checked = false;
+    ui.chatRagRouting.value = "strict";
+  }
+  syncVerifiedRagToggle();
+}
+
+async function switchWorkingProject() {
+  if (sending) { renderWorkspaceSelector(); return; }
+  const id = ui.workspaceSelect.value || null;
+  await api("/api/workspace/select", { method: "POST", body: { project_id: id } });
+  appState.activeWorkspaceProjectId = id;
+  const existing = appState.conversations.find(c => (c.project_id || null) === id);
+  if (existing) await openConversation(existing.id);
+  else await createConversation(id);
+  if (!ui.ragPanel.hidden) await Promise.all([loadRagState(), loadRagEvaluationState()]);
 }
 
 async function openProjectShare(projectId) {
@@ -979,7 +866,9 @@ function renderMessages() {
       ? (automaticContinuation ? "Автопилот" : profileName)
       : (localCommand ? "Состояние задачи · сервер" : `DeepSeek · профиль «${profileName}»`);
     element.querySelector("time").textContent = formatDate(message.created_at, true);
-    element.querySelector(".message-text").textContent = message.content;
+    const messageText = element.querySelector(".message-text");
+    if (message.role === "assistant") ChatMarkdown.renderInto(messageText, message.content);
+    else messageText.textContent = message.content;
     const ragAudit = message.technical?.rag;
     if (ragAudit?.enabled) {
       const badge = document.createElement("div");
@@ -993,7 +882,7 @@ function renderMessages() {
         ? ` · проверяемый · ${evidence?.status === "unknown" ? "не знаю" : evidence?.valid ? "цитаты проверены" : "проверка не пройдена"}`
         : "";
       const score = ragAudit.max_similarity == null ? "" : ` · max sim ${Number(ragAudit.max_similarity).toFixed(4)}`;
-      badge.textContent = `RAG · ${ragAudit.mode || "baseline"} · ${ragAudit.strategy}${route}${probe} · ${ragAudit.candidate_k || ragAudit.top_k} → ${Array.isArray(ragAudit.chunks) ? ragAudit.chunks.length : 0} чанков${score}${verified}${outside}`;
+      badge.textContent = `RAG · ${ragAudit.mode || "baseline"} · ${ragAudit.strategy}${route}${probe} · ${ragAudit.candidate_k ?? ragAudit.top_k ?? ragAudit.chunks?.length ?? 0} → ${Array.isArray(ragAudit.chunks) ? ragAudit.chunks.length : 0} чанков${score}${verified}${outside}`;
       element.querySelector(".message-text").after(badge);
     }
     const audit = message.technical?.policy_audit;
@@ -1068,18 +957,12 @@ function visibleMcpArguments(argumentsValue) {
 }
 
 function createMcpCallsPanel(calls, { live = false, phase = "" } = {}) {
-  if (!calls?.length && !live) return null;
+  if (!calls?.length) return null;
   const panel = document.createElement("section");
   panel.className = `mcp-call-panel${live ? " live" : ""}`;
   const heading = document.createElement("strong");
   heading.textContent = live ? "MCP-инструменты во время выполнения" : "Использованные MCP-инструменты";
   panel.append(heading);
-  if (!calls?.length) {
-    const waiting = document.createElement("small");
-    waiting.textContent = phase === "thinking" ? "DeepSeek выбирает подходящие инструменты…" : "Ожидаем вызов инструмента…";
-    panel.append(waiting);
-    return panel;
-  }
   calls.forEach((call, index) => {
     const row = document.createElement("div");
     row.className = `mcp-call-row ${call.status || (call.is_error ? "error" : "completed")}`;
@@ -2073,7 +1956,7 @@ async function renameChat() {
 async function deleteChat() {
   if (!activeConversation || !confirm(`Удалить диалог «${activeConversation.title}»?`)) return;
   await api(`/api/conversations/${activeConversation.id}`, { method: "DELETE" }); activeConversation = null; await refreshState();
-  if (appState.conversations.length) await openConversation(appState.conversations[0].id); else renderEmptyWorkspace();
+  if (preferredWorkspaceConversation()) await openConversation(preferredWorkspaceConversation().id); else renderEmptyWorkspace();
 }
 
 function openPresetDialog(forSave = false) { renderPresetList(); clearPresetEditor(); if (forSave) ui.presetName.focus(); ui.presetDialog.showModal(); }
@@ -2375,6 +2258,7 @@ function showMemorySnapshot(snapshot) {
 }
 
 function setWorkspaceView(view) {
+  setWorkspaceMenu(false);
   const rag = view === "rag";
   document.body.classList.toggle("rag-mode", rag);
   ui.ragPanel.hidden = !rag;
@@ -2386,8 +2270,11 @@ function setWorkspaceView(view) {
 }
 
 async function loadRagState() {
+  const expectedProject = appState.activeWorkspaceProjectId || null;
   const previousRun = ragState?.latest_run?.id || null;
-  ragState = await api("/api/rag/state");
+  const loaded = await api("/api/rag/state");
+  if (expectedProject !== (appState.activeWorkspaceProjectId || null)) return;
+  ragState = loaded;
   renderRagState();
   const currentRun = ragState.latest_run?.id || null;
   if (currentRun && (currentRun !== previousRun || currentRun !== ragLoadedRunId)) {
@@ -2400,6 +2287,10 @@ async function loadRagState() {
 
 function renderRagState() {
   if (!ragState) return;
+  const projectStatus = document.querySelector("#developer-project-status");
+  if (projectStatus && ragState.project) {
+    projectStatus.textContent = `Проект: ${ragState.project.root} · ${ragState.project.source_count} документов · ${ragState.project.stale ? "документация изменилась — обновите индекс" : "копия документации актуальна"}`;
+  }
   ui.ragFolder.textContent = ragState.documents_dir || "";
   ui.ragModel.textContent = `${ragState.model_name || ""}${ragState.reranker_model_name ? ` · reranker: ${ragState.reranker_model_name}` : ""}`;
   renderRagFiles(ragState.files || []);
@@ -2562,7 +2453,10 @@ function renderRagSearchResults(container, items) {
 }
 
 async function loadRagEvaluationState() {
-  ragEvaluationState = await api("/api/rag/evaluations");
+  const expectedProject = appState.activeWorkspaceProjectId || null;
+  const loaded = await api("/api/rag/evaluations");
+  if (expectedProject !== (appState.activeWorkspaceProjectId || null)) return;
+  ragEvaluationState = loaded;
   renderRagEvaluationState();
 }
 
@@ -2835,6 +2729,9 @@ function formatBytes(value) {
 }
 
 async function api(url, options = {}) {
+  if (url.startsWith("/api/rag/") || url.startsWith("/api/mcp/")) {
+    url += `${url.includes("?") ? "&" : "?"}workspace_project_id=${encodeURIComponent(appState.activeWorkspaceProjectId || "")}`;
+  }
   const init = { method: options.method || "GET", headers: {} };
   if (options.body !== undefined) { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(options.body); }
   const response = await fetch(url, init); const data = await response.json().catch(() => ({}));
@@ -2876,6 +2773,13 @@ ui.projectShareSave.addEventListener("click", () => saveProjectShare());
 ui.newProject.addEventListener("click", () => { ui.newProjectForm.hidden = false; ui.newProjectName.focus(); });
 ui.newProjectCancel.addEventListener("click", () => { ui.newProjectForm.hidden = true; ui.newProjectName.value = ""; });
 ui.newProjectForm.addEventListener("submit", (event) => createSidebarProject(event).catch(showError));
+ui.workspaceSelect.addEventListener("change", () => switchWorkingProject().catch(showError));
+document.querySelectorAll("[data-workspace-menu]").forEach(el => el.addEventListener("click", () => setWorkspaceMenu(!document.body.classList.contains("workspace-nav-open"))));
+document.querySelector("#workspace-backdrop")?.addEventListener("click", () => setWorkspaceMenu(false));
+document.addEventListener("keydown", event => { if (event.key === "Escape") setWorkspaceMenu(false); });
+ui.newProjectKind.addEventListener("change", () => {
+  ui.newProjectSource.placeholder = ui.newProjectKind.value === "github" ? "https://github.com/owner/repository" : "C:\\путь\\к\\проекту";
+});
 ui.form.addEventListener("submit", submitMessage); ui.input.addEventListener("input", resizeInput);
 ui.voiceButton.addEventListener("click", toggleVoiceRecording);
 ui.mcpDisableAll.addEventListener("click", () => setMcpControl(false));
@@ -2885,25 +2789,12 @@ ui.taskControlEnable.addEventListener("click", () => setTaskControl(true));
 ui.mcpStart.addEventListener("click", () => runMcpAction("start"));
 ui.mcpTools.addEventListener("click", () => runMcpAction("tools"));
 ui.mcpStop.addEventListener("click", () => runMcpAction("stop"));
-ui.weatherMcpStart.addEventListener("click", () => runWeatherMcpAction("start"));
-ui.weatherMcpTools.addEventListener("click", () => runWeatherMcpAction("tools"));
-ui.weatherMcpStop.addEventListener("click", () => runWeatherMcpAction("stop"));
-Object.keys(orchestrationMcp).forEach((name) => {
-  const elements = orchestrationMcpUi(name);
-  elements.start.addEventListener("click", () => runOrchestrationMcpAction(name, "start"));
-  elements.tools.addEventListener("click", () => runOrchestrationMcpAction(name, "tools"));
-  elements.stop.addEventListener("click", () => runOrchestrationMcpAction(name, "stop"));
-});
 ui.schedulerButton.addEventListener("click", () => { refreshSchedulerState().catch(showError); ui.schedulerDialog.showModal(); });
 ui.schedulerClose.addEventListener("click", () => ui.schedulerDialog.close());
 ui.schedulerType.addEventListener("change", () => { ui.schedulerIntervalLabel.hidden = ui.schedulerType.value !== "interval"; });
-ui.schedulerUseWeather.addEventListener("change", () => {
-  ui.schedulerWeatherTools.hidden = !ui.schedulerUseWeather.checked;
-  if (!ui.schedulerUseWeather.checked) ui.schedulerWeatherTools.querySelectorAll("input").forEach((input) => { input.checked = false; });
-});
 ui.schedulerReset.addEventListener("click", resetSchedulerEditor);
 ui.schedulerSave.addEventListener("click", () => saveScheduledTask());
-ui.schedulerShowTools.addEventListener("click", () => showSchedulerTools().catch(showError));
+ui.schedulerShowTools.addEventListener("click", () => openMcpManager());
 ui.schedulerReadAll.addEventListener("click", () => markSchedulerNotificationsRead().catch(showError));
 ui.input.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); ui.form.requestSubmit(); } });
 ui.chatTitle.addEventListener("change", renameChat); ui.chatTitle.addEventListener("blur", renameChat);
@@ -2950,3 +2841,109 @@ ui.resetCustom.addEventListener("click", () => { selectedPresetId = ""; ui.prese
 ui.saveAsPreset.addEventListener("click", () => openPresetDialog(true)); ui.presetsButton.addEventListener("click", () => openPresetDialog());
 ui.presetSave.addEventListener("click", savePreset); ui.presetCancelEdit.addEventListener("click", clearPresetEditor);
 document.querySelectorAll("#settings-panel input, #settings-panel textarea, #settings-panel select").forEach((control) => control.addEventListener("input", updateSettingsSummary));
+
+
+function managedServerAllowed(name) {
+  return mcpAllowed() && (managedServers?.servers.find(item => item.id === name)?.enabled ?? true);
+}
+function showManagedError(error) {
+  $("#mcp-manager-error").textContent = error.message || String(error);
+}
+async function openMcpManager() {
+  // Native dialogs cannot overlap: close the schedule window before opening management.
+  ui.schedulerDialog.close();
+  $("#mcp-manager-dialog").showModal();
+  $("#mcp-manager-error").textContent = "";
+  try { await refreshManagedServers(); } catch (error) { showManagedError(error); }
+}
+async function refreshManagedServers() {
+  const expectedProject = appState.activeWorkspaceProjectId || null;
+  const data = await api("/api/mcp/servers");
+  if ((appState.activeWorkspaceProjectId || null) !== expectedProject) return;
+  managedServers = data;
+  mcpControlState.enabled = data.global_enabled;
+  mcpState = data.servers.find(item => item.id === "filesystem").status;
+  renderMcpControlState();
+  renderManagedServers();
+}
+function renderManagedServers() {
+  if (!managedServers) return;
+  const data = managedServers;
+  $("#mcp-manager-workspace").textContent = `Рабочий проект: ${data.workspace.name} · ${data.workspace.root}`;
+  const overview = $("#mcp-manager-overview");
+  overview.replaceChildren();
+  for (const item of data.servers) {
+    const badge = document.createElement("span");
+    badge.textContent = `${{project:"Project",filesystem:"Filesystem",scheduler:"Scheduler"}[item.id]} MCP: ${!item.allowed ? "запрещён" : item.status.connected ? "подключён" : item.status.phase === "error" ? "ошибка" : "остановлен"}`;
+    overview.append(badge);
+  }
+  $("#mcp-executor-state").textContent = data.executor.running ? "Исполнитель расписаний запущен." : "Исполнитель расписаний остановлен.";
+  const fsToggle = $('[data-server-toggle="filesystem"]');
+  fsToggle.checked = data.servers.find(item => item.id === "filesystem").enabled;
+  fsToggle.disabled = managedBusy;
+  const target = $("#mcp-managed-servers");
+  target.replaceChildren();
+  const descriptions = {project: ["Project MCP", "Git-ветка и список файлов выбранного проекта. Только чтение. Автоматический запуск для /help и вопросов о проекте."], scheduler: ["Scheduler MCP", "Инструменты создания и управления расписаниями. При запуске приложения подключается автоматически, если разрешён."]};
+  const phases = {stopped:"Остановлен", starting:"Запускается", running:"Подключён", stopping:"Останавливается", error:"Ошибка"};
+  for (const item of data.servers.filter(item => item.id !== "filesystem")) {
+    const card = document.createElement("section"); card.className = "mcp-card";
+    const title = document.createElement("h3"); title.textContent = descriptions[item.id][0];
+    const label = document.createElement("label"); label.className = "mcp-permission";
+    const toggle = document.createElement("input"); toggle.type = "checkbox"; toggle.dataset.serverToggle = item.id; toggle.checked = item.enabled; toggle.disabled = managedBusy;
+    label.append(toggle, document.createTextNode(" Разрешить во всех проектах"));
+    const description = document.createElement("p"); description.textContent = descriptions[item.id][1];
+    const status = document.createElement("p"); status.textContent = `${item.allowed ? "Разрешён" : "Заблокирован"} · ${phases[item.status.phase] || item.status.phase} · Инструментов: ${item.status.tool_count || 0}`;
+    const scope = document.createElement("p"); scope.className = "mcp-server-scope"; scope.textContent = `Область работы: ${item.scope}`;
+    const message = document.createElement("p"); message.textContent = item.status.error || item.status.message || ""; message.className = item.status.error ? "error" : "";
+    const actions = document.createElement("div"); actions.className = "mcp-actions";
+    const transitioning = ["starting", "stopping"].includes(item.status.phase);
+    for (const [action, text] of [["start","Запустить"],["stop","Остановить"],["tools","Инструменты"]]) {
+      const button = document.createElement("button"); button.type = "button"; button.className = "secondary"; button.textContent = text;
+      button.disabled = managedBusy || transitioning || (action === "stop" ? !item.status.connected : !item.allowed || (action === "start" ? item.status.connected : !item.status.connected));
+      button.dataset.server = item.id; button.dataset.serverAction = action; actions.append(button);
+    }
+    const tools = document.createElement("div"); tools.dataset.serverTools = item.id;
+    card.append(title, label, description, status, scope, message, actions, tools); target.append(card);
+  }
+}
+async function managedServerAction(name, action) {
+  if (managedBusy || mcpBusy || mcpControlBusy) return;
+  managedBusy = true; $("#mcp-manager-error").textContent = ""; renderManagedServers(); renderMcpState();
+  try {
+    const data = await api(`/api/mcp/servers/${name}/${action}`, {method:"POST", body:{}});
+    await refreshManagedServers();
+    if (Object.keys(data.errors || {}).length) throw new Error(Object.values(data.errors).join("; "));
+    if (action === "disable" && name === "filesystem") ui.mcpToolList.replaceChildren();
+    if (data.tools) {
+      const target = document.querySelector(`[data-server-tools="${name}"]`);
+      for (const tool of data.tools) {
+        const details = document.createElement("details"); details.className = "mcp-tool";
+        const title = document.createElement("summary"); title.textContent = tool.name;
+        const description = document.createElement("p"); description.textContent = tool.description || "";
+        const schema = document.createElement("pre"); schema.textContent = JSON.stringify(tool.input_schema || {}, null, 2);
+        details.append(title, description, schema); target.append(details);
+      }
+    }
+  } catch (error) { showManagedError(error); await refreshManagedServers().catch(() => {}); }
+  finally {
+    managedBusy = false;
+    $("#mcp-manager-dialog").querySelectorAll("[data-server-toggle]").forEach(el => { el.disabled = false; });
+    $("#mcp-managed-servers").querySelectorAll("[data-server-action]").forEach(el => {
+      const item = managedServers?.servers.find(item => item.id === el.dataset.server);
+      el.disabled = !item || ["starting","stopping"].includes(item.status.phase) || (el.dataset.serverAction === "stop" ? !item.status.connected : !item.allowed || (el.dataset.serverAction === "start" ? item.status.connected : !item.status.connected));
+    });
+    renderMcpState();
+  }
+}
+$("#mcp-manager-open").addEventListener("click", openMcpManager);
+$("#mcp-manager-close").addEventListener("click", () => $("#mcp-manager-dialog").close());
+$("#mcp-manager-dialog").addEventListener("change", event => {
+  if (event.target.dataset.serverToggle) managedServerAction(event.target.dataset.serverToggle, event.target.checked ? "enable" : "disable");
+});
+$("#mcp-manager-dialog").addEventListener("click", event => {
+  const button = event.target.closest("[data-server-action]");
+  if (button) managedServerAction(button.dataset.server, button.dataset.serverAction);
+});
+$("#mcp-open-scheduler").addEventListener("click", () => {
+  $("#mcp-manager-dialog").close(); $("#scheduler-button").click();
+});

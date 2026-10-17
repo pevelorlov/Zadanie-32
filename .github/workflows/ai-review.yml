@@ -1,0 +1,100 @@
+name: DeepSeek PR review (local runner)
+
+# Доверенный workflow из основной ветки. Код PR читается через Git, не исполняется.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deepseek-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # По умолчанию выключено; также требуется точное имя правильного репозитория.
+    if: >-
+      vars.AI_REVIEW_ENABLED == 'true' &&
+      vars.AI_REVIEW_REPOSITORY == github.repository &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.draft == false
+    runs-on: [self-hosted, Windows, X64, deepseek-review]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout trusted base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR objects without checkout
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:PR_NUMBER -notmatch '^\d+$' -or $env:HEAD_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Invalid PR metadata' }
+          $fetchAuth = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("x-access-token:$env:FETCH_TOKEN"))
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'http.https://github.com/.extraheader'
+          $env:GIT_CONFIG_VALUE_0 = "AUTHORIZATION: basic $fetchAuth"
+          git fetch --no-tags origin "refs/pull/$env:PR_NUMBER/head"
+          if ($LASTEXITCODE -ne 0) { throw 'PR fetch failed' }
+          $fetchedHead = git rev-parse FETCH_HEAD
+          if ($fetchedHead -ne $env:HEAD_SHA) { throw 'PR changed during fetch; wait for next run' }
+
+      - name: Review with trusted Python environment
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          REVIEW_PYTHON: ${{ vars.AI_REVIEW_PYTHON }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PYTHONUTF8: '1'
+        run: |
+          if (-not [IO.Path]::IsPathFullyQualified($env:REVIEW_PYTHON) -or -not (Test-Path -LiteralPath $env:REVIEW_PYTHON)) { throw 'Configure AI_REVIEW_PYTHON' }
+          if (-not $env:DEEPSEEK_API_KEY) { throw 'Configure DEEPSEEK_API_KEY secret' }
+          & $env:REVIEW_PYTHON code_review.py --base $env:BASE_SHA --head $env:HEAD_SHA --output reports/day32
+          if ($LASTEXITCODE -ne 0) { throw 'AI review failed; no comment published' }
+
+      - name: Create or update review comment
+        uses: actions/github-script@v7
+        env:
+          REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = await github.rest.pulls.get({...context.repo, pull_number: context.issue.number});
+            if (pr.data.state !== 'open' || pr.data.head.sha !== process.env.REVIEW_HEAD) {
+              core.notice('Outdated review; comment skipped');
+              return;
+            }
+            const body = fs.readFileSync('reports/day32/review.md', 'utf8');
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: context.issue.number, per_page: 100
+            });
+            const previous = comments.find(c => c.user.login === 'github-actions[bot]' &&
+              c.body.startsWith('<!-- deepseek-agent-review -->'));
+            if (previous) {
+              await github.rest.issues.updateComment({...context.repo, comment_id: previous.id, body});
+            } else {
+              await github.rest.issues.createComment({...context.repo, issue_number: context.issue.number, body});
+            }
+
+      - name: Save report and audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: reports/day32/
+          if-no-files-found: ignore
+          retention-days: 14

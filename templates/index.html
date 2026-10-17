@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Локальный многодиалоговый агент DeepSeek">
   <title>DeepSeek Agent</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261003-day23') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='20261017-mcp-manager') }}">
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" id="workspace-navigation">
       <div class="brand"><span class="brand-mark">D</span><div><strong>DeepSeek Agent</strong><small>Локальная история JSON</small></div></div>
       <div class="profile-switcher">
         <label>Активный профиль<select id="profile-select" aria-label="Активный профиль"></select></label>
@@ -25,9 +25,16 @@
         <button id="rag-view-button" class="workspace-tab" type="button" role="tab" aria-selected="false">Управление RAG</button>
       </div>
       <form id="new-project-form" class="sidebar-project-form" hidden>
-        <input id="new-project-name" maxlength="120" placeholder="Название проекта" required>
+        <input id="new-project-name" maxlength="120" placeholder="Название проекта (можно автоматически)">
+        <select id="new-project-kind" aria-label="Источник проекта"><option value="github">Публичный GitHub</option><option value="local">Локальная папка</option></select>
+        <input id="new-project-source" placeholder="https://github.com/owner/repository" aria-label="Ссылка или папка проекта" required>
+        <small>Будут созданы отдельные чат, память и RAG. Код проекта не запускается.</small>
         <div><button class="primary" type="submit">Создать</button><button id="new-project-cancel" class="secondary" type="button">Отмена</button></div>
       </form>
+      <section class="workspace-picker" aria-label="Рабочий проект">
+        <label>Рабочий проект<select id="workspace-select" aria-label="Рабочий проект"><option value="">Сам ассистент</option></select></label>
+        <small id="workspace-source">Собственные исходники</small>
+      </section>
       <div class="sidebar-heading"><span>Проекты и диалоги</span><button id="import-button" class="icon-button" title="Импортировать JSON">⇧</button></div>
       <input id="import-file" type="file" accept="application/json,.json" hidden>
       <nav id="conversation-list" class="conversation-list" aria-label="Диалоги"></nav>
@@ -44,6 +51,7 @@
     <main class="chat-panel">
       <header class="chat-header">
         <div>
+          <button class="secondary workspace-menu-button" data-workspace-menu type="button" aria-controls="workspace-navigation" aria-expanded="false">Проекты</button>
           <input id="chat-title" class="title-input" value="Новый диалог" maxlength="120" aria-label="Название диалога">
           <div id="chat-subtitle" class="subtitle">DeepSeek · история сохраняется автоматически</div>
           <div id="token-overview" class="token-overview" aria-label="Накопленные токены диалога" hidden></div>
@@ -68,6 +76,7 @@
           <label>Конфигурация
             <select id="preset-select"><option value="">Разовые настройки</option></select>
           </label>
+          <button id="mcp-manager-open" class="secondary" type="button">MCP</button>
           <button id="settings-toggle" class="secondary" type="button">Настройки запроса</button>
           <span id="settings-summary" class="settings-summary"></span>
           <label class="rag-chat-toggle" title="Добавить найденные документальные чанки только к следующему сообщению"><input id="chat-rag-enabled" type="checkbox"><span>RAG</span></label>
@@ -80,8 +89,9 @@
           <label class="rag-chat-option">Порог<input id="chat-rag-threshold" type="number" min="-1" max="1" step="0.01" value="0.83"></label>
           <span id="request-status" class="request-status" role="status" hidden><i></i> Запрос отправлен · ожидаем DeepSeek</span>
         </div>
+        <div class="composer-foot"><span id="workspace-chat-label">Ассистент разработчика · собственные исходники</span><span><code>/help вопрос</code> — справка о выбранном проекте</span></div>
         <form id="message-form" class="composer">
-          <textarea id="message-input" maxlength="50000" rows="1" placeholder="Напишите сообщение…"></textarea>
+          <textarea id="message-input" maxlength="50000" rows="1" placeholder="Сообщение или /help вопрос о проекте…"></textarea>
           <button id="voice-button" class="voice-button" type="button" title="Надиктовать сообщение" aria-label="Надиктовать сообщение" disabled>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12h-2Z"/></svg>
           </button>
@@ -97,78 +107,6 @@
         <span id="context-status" class="context-status">Полная история</span>
       </div>
       <div class="context-scroll">
-        <section class="mcp-card mcp-master-card" aria-labelledby="mcp-control-title">
-          <div class="section-title">
-            <div><small>ОБЩИЙ ВЫКЛЮЧАТЕЛЬ</small><h3 id="mcp-control-title">Все MCP</h3></div>
-            <span id="mcp-control-status" class="mcp-status running">Разрешены</span>
-          </div>
-          <small>Принудительное отключение останавливает все MCP и запрещает их ручной и автоматический запуск, в том числе после перезапуска приложения.</small>
-          <div class="mcp-actions">
-            <button id="mcp-disable-all" class="danger" type="button">Отключить все MCP</button>
-            <button id="mcp-enable-all" class="secondary" type="button" disabled>Разрешить MCP</button>
-          </div>
-          <p id="mcp-control-message" class="mcp-message" role="status">MCP разрешены.</p>
-        </section>
-        <section class="mcp-card" aria-labelledby="mediawiki-mcp-title">
-          <div class="section-title">
-            <div><small>ДЕНЬ 20</small><h3 id="mediawiki-mcp-title">MediaWiki MCP</h3></div>
-            <span id="mediawiki-mcp-status" class="mcp-status stopped">Остановлен</span>
-          </div>
-          <small>ProfessionalWiki MCP: анонимный поиск и чтение русской Wikipedia. Модели доступен только read-only набор.</small>
-          <div class="mcp-actions">
-            <button id="mediawiki-mcp-start" class="primary" type="button">Запустить MCP</button>
-            <button id="mediawiki-mcp-tools" class="secondary" type="button" disabled>Получить инструменты</button>
-            <button id="mediawiki-mcp-stop" class="danger" type="button" disabled>Остановить MCP</button>
-          </div>
-          <p id="mediawiki-mcp-message" class="mcp-message" role="status">MCP-сервер не запущен.</p>
-          <dl id="mediawiki-mcp-details" class="mcp-details" hidden></dl>
-          <div id="mediawiki-mcp-tool-list" class="mcp-tool-list"></div>
-        </section>
-        <section class="mcp-card" aria-labelledby="worldbank-mcp-title">
-          <div class="section-title">
-            <div><small>ДЕНЬ 20</small><h3 id="worldbank-mcp-title">World Bank MCP</h3></div>
-            <span id="worldbank-mcp-status" class="mcp-status stopped">Остановлен</span>
-          </div>
-          <small>Публичные показатели, страны, бедность и проекты Всемирного банка. API-ключ не требуется.</small>
-          <div class="mcp-actions">
-            <button id="worldbank-mcp-start" class="primary" type="button">Запустить MCP</button>
-            <button id="worldbank-mcp-tools" class="secondary" type="button" disabled>Получить инструменты</button>
-            <button id="worldbank-mcp-stop" class="danger" type="button" disabled>Остановить MCP</button>
-          </div>
-          <p id="worldbank-mcp-message" class="mcp-message" role="status">MCP-сервер не запущен.</p>
-          <dl id="worldbank-mcp-details" class="mcp-details" hidden></dl>
-          <div id="worldbank-mcp-tool-list" class="mcp-tool-list"></div>
-        </section>
-        <section class="mcp-card" aria-labelledby="weather-mcp-title">
-          <div class="section-title">
-            <div><small>ДЕНЬ 17</small><h3 id="weather-mcp-title">Open‑Meteo MCP</h3></div>
-            <span id="weather-mcp-status" class="mcp-status stopped">Остановлен</span>
-          </div>
-          <small>Пять погодных инструментов передаются DeepSeek. После запуска можно спросить в чате о погоде и подходящей одежде.</small>
-          <div class="mcp-actions">
-            <button id="weather-mcp-start" class="primary" type="button">Запустить MCP</button>
-            <button id="weather-mcp-tools" class="secondary" type="button" disabled>Получить инструменты</button>
-            <button id="weather-mcp-stop" class="danger" type="button" disabled>Остановить MCP</button>
-          </div>
-          <p id="weather-mcp-message" class="mcp-message" role="status">MCP-сервер не запущен.</p>
-          <dl id="weather-mcp-details" class="mcp-details" hidden></dl>
-          <div id="weather-mcp-tool-list" class="mcp-tool-list"></div>
-        </section>
-        <section class="mcp-card" aria-labelledby="mcp-title">
-          <div class="section-title">
-            <div><small>ДЕНЬ 16</small><h3 id="mcp-title">Filesystem MCP</h3></div>
-            <span id="mcp-status" class="mcp-status stopped">Остановлен</span>
-          </div>
-          <small>Сервер видит только папку проекта <code>workspace</code>. При явной просьбе сохранить отчёт он запускается автоматически и передаёт модели только безопасный <code>write_file</code> для <code>workspace/reports</code>.</small>
-          <div class="mcp-actions">
-            <button id="mcp-start" class="primary" type="button">Запустить MCP</button>
-            <button id="mcp-tools" class="secondary" type="button" disabled>Получить инструменты</button>
-            <button id="mcp-stop" class="danger" type="button" disabled>Остановить MCP</button>
-          </div>
-          <p id="mcp-message" class="mcp-message" role="status">MCP-сервер не запущен.</p>
-          <dl id="mcp-details" class="mcp-details" hidden></dl>
-          <div id="mcp-tool-list" class="mcp-tool-list"></div>
-        </section>
         <section class="task-state-card" aria-labelledby="task-state-title">
           <div class="section-title">
             <div><small>ДЕНЬ 15</small><h3 id="task-state-title">Контролируемый жизненный цикл</h3></div>
@@ -313,7 +251,8 @@
 
     <main id="rag-panel" class="rag-panel" hidden>
       <header class="rag-header">
-        <div><small>ДЕНЬ 21</small><h1>Индексация документов</h1><p>Локальные чанки, эмбеддинги и сравнительный поиск без вызова DeepSeek.</p></div>
+        <button class="secondary workspace-menu-button" data-workspace-menu type="button" aria-controls="workspace-navigation" aria-expanded="false">Проекты</button>
+        <div><small>ДЕНЬ 31 · АССИСТЕНТ РАЗРАБОТЧИКА</small><h1>Индексация документов</h1><p>Документация выбранного рабочего проекта. У каждого проекта — отдельный индекс.</p><p id="developer-project-status" role="status"></p></div>
         <span id="rag-header-status" class="rag-status idle">Индекс не построен</span>
       </header>
       <div class="rag-scroll">
@@ -330,7 +269,7 @@
             <fieldset><legend>Fixed chunking</legend><label>Размер, токенов<input id="rag-fixed-size" type="number" min="32" max="500" value="350"></label><label>Overlap, токенов<input id="rag-fixed-overlap" type="number" min="0" max="499" value="50"></label></fieldset>
             <fieldset><legend>Structural chunking</legend><label>Максимум, токенов<input id="rag-structural-size" type="number" min="32" max="500" value="350"></label><label>Overlap при делении<input id="rag-structural-overlap" type="number" min="0" max="499" value="50"></label></fieldset>
           </div>
-          <button id="rag-build" class="primary rag-build" type="button">Построить оба индекса</button>
+          <button id="rag-build" class="primary rag-build" type="button">Обновить документацию проекта и оба индекса</button>
           <p id="rag-build-note" class="rag-help">Модель запускается на CPU и загружается только при индексации или поиске.</p>
         </section>
 
@@ -619,8 +558,8 @@
         <section class="scheduler-editor">
           <div class="section-title"><strong id="scheduler-editor-title">Новое задание</strong><small>DeepSeek вызывается автоматически</small></div>
           <input id="scheduler-edit-id" type="hidden">
-          <label>Название<input id="scheduler-task-title" maxlength="160" placeholder="Утренняя погода"></label>
-          <label>Промпт<textarea id="scheduler-task-prompt" maxlength="50000" rows="5" placeholder="Получи погоду в Новосибирске и предложи одежду."></textarea></label>
+          <label>Название<input id="scheduler-task-title" maxlength="160" placeholder="Сводка по проекту"></label>
+          <label>Промпт<textarea id="scheduler-task-prompt" maxlength="50000" rows="5" placeholder="/help Объясни структуру проекта и перечисли основные модули."></textarea></label>
           <label>Тип расписания
             <select id="scheduler-type">
               <option value="once">Один раз</option>
@@ -632,17 +571,6 @@
             <label>Или через, минут<input id="scheduler-delay" type="number" min="0.1" step="0.1" placeholder="60"></label>
             <label id="scheduler-interval-label" hidden>Период, минут<input id="scheduler-interval" type="number" min="5" step="1" value="60"></label>
           </div>
-          <fieldset class="scheduler-tools">
-            <legend>MCP-зависимости</legend>
-            <label class="toggle-row"><input id="scheduler-use-weather" type="checkbox"><span>Open‑Meteo MCP</span></label>
-            <div id="scheduler-weather-tools" class="scheduler-tool-options" hidden>
-              <label><input type="checkbox" value="find_location"> find_location</label>
-              <label><input type="checkbox" value="get_current_weather"> get_current_weather</label>
-              <label><input type="checkbox" value="get_hourly_forecast"> get_hourly_forecast</label>
-              <label><input type="checkbox" value="get_daily_forecast"> get_daily_forecast</label>
-              <label><input type="checkbox" value="get_precipitation_window"> get_precipitation_window</label>
-            </div>
-          </fieldset>
           <p class="scheduler-cost-note">Периодические задания выполняют платные запросы DeepSeek. Минимальный период — 5 минут. Пропущенные запуски не догоняются.</p>
           <p id="scheduler-error" class="form-error" role="alert"></p>
           <div class="dialog-actions">
@@ -653,7 +581,7 @@
         <section class="scheduler-overview">
           <div id="scheduler-summary" class="scheduler-summary"></div>
           <div class="scheduler-overview-actions">
-            <button id="scheduler-show-tools" class="secondary" type="button">Инструменты MCP</button>
+            <button id="scheduler-show-tools" class="secondary" type="button">Управление MCP</button>
             <button id="scheduler-read-all" class="secondary" type="button">Прочитать уведомления</button>
           </div>
           <div id="scheduler-mcp-tools" class="scheduler-mcp-tools" hidden></div>
@@ -667,9 +595,48 @@
     </div>
   </dialog>
 
+  <dialog id="mcp-manager-dialog" class="mcp-manager-dialog">
+    <div class="panel-heading"><div><h2>MCP — серверы и разрешения</h2><small>Разрешения общие для приложения. Папки соответствуют выбранному проекту.</small></div><button id="mcp-manager-close" class="icon-button" type="button" aria-label="Закрыть управление MCP">×</button></div>
+    <p id="mcp-manager-workspace"></p>
+    <div id="mcp-manager-overview" class="mcp-manager-overview"></div>
+    <p id="mcp-manager-error" role="alert"></p>
+        <section class="mcp-card mcp-master-card" aria-labelledby="mcp-control-title">
+          <div class="section-title">
+            <div><small>ОБЩИЙ ВЫКЛЮЧАТЕЛЬ</small><h3 id="mcp-control-title">Все MCP</h3></div>
+            <span id="mcp-control-status" class="mcp-status running">Разрешены</span>
+          </div>
+          <small>Принудительное отключение останавливает все MCP и запрещает их ручной и автоматический запуск, в том числе после перезапуска приложения.</small>
+          <div class="mcp-actions">
+            <button id="mcp-disable-all" class="danger" type="button">Отключить все MCP</button>
+            <button id="mcp-enable-all" class="secondary" type="button" disabled>Разрешить MCP</button>
+          </div>
+          <p id="mcp-control-message" class="mcp-message" role="status">MCP разрешены.</p>
+        </section>
+        <section class="mcp-card" aria-labelledby="mcp-title">
+          <div class="section-title">
+            <div><small>ФАЙЛЫ ПРОЕКТА</small><h3 id="mcp-title">Filesystem MCP</h3></div>
+            <span id="mcp-status" class="mcp-status stopped">Остановлен</span>
+          </div>
+          <label class="mcp-permission"><input type="checkbox" data-server-toggle="filesystem"> Разрешить Filesystem MCP во всех проектах</label>
+          <small id="filesystem-scope-note">Сервер видит только папку проекта <code>workspace</code>. При явной просьбе сохранить отчёт он запускается автоматически и передаёт модели только безопасный <code>write_file</code> для <code>workspace/reports</code>.</small>
+          <div class="mcp-actions">
+            <button id="mcp-start" class="primary" type="button">Запустить MCP</button>
+            <button id="mcp-tools" class="secondary" type="button" disabled>Получить инструменты</button>
+            <button id="mcp-stop" class="danger" type="button" disabled>Остановить MCP</button>
+          </div>
+          <p id="mcp-message" class="mcp-message" role="status">MCP-сервер не запущен.</p>
+          <dl id="mcp-details" class="mcp-details" hidden></dl>
+          <div id="mcp-tool-list" class="mcp-tool-list"></div>
+        </section>
+    <div id="mcp-managed-servers"></div>
+    <section class="mcp-card"><h3>Исполнение расписаний</h3><p id="mcp-executor-state"></p><small>Отключение Scheduler MCP запрещает инструменты расписаний. Уже созданные задания продолжают выполняться независимо.</small><p><button id="mcp-open-scheduler" class="secondary" type="button">Открыть расписания</button></p></section>
+  </dialog>
+  <button id="workspace-backdrop" class="workspace-backdrop" type="button" aria-label="Закрыть панель проектов"></button>
   <template id="message-template">
     <article class="message"><div class="message-avatar"></div><div class="message-body"><header><strong></strong><time></time></header><div class="message-text"></div><div class="message-actions"><button class="fork-button" type="button">Разветвить</button><button class="policy-retry-button" type="button" hidden>Сгенерировать заново</button><button class="memory-used-button" type="button" hidden>Какая память использована</button><div class="branch-switch" hidden><button class="branch-prev" type="button" aria-label="Предыдущая ветка">‹</button><span></span><button class="branch-next" type="button" aria-label="Следующая ветка">›</button></div></div><div class="token-strip" hidden></div><details class="reasoning" hidden><summary>Ход рассуждений</summary><div></div></details><details class="technical"><summary>Техническая информация</summary><pre></pre></details></div></article>
   </template>
-  <script src="{{ url_for('static', filename='app.js', v='20261003-day23') }}"></script>
+  <script src="{{ url_for('static', filename='vendor/markdown-it.min.js', v='15.0.3') }}"></script>
+  <script src="{{ url_for('static', filename='markdown.js', v='20261017') }}"></script>
+  <script src="{{ url_for('static', filename='app.js', v='20261017-markdown') }}"></script>
 </body>
 </html>

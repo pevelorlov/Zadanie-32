@@ -1,19 +1,16 @@
-# MCP-серверы Дней 17–18
+# MCP текущего ассистента
 
-Каждый сервер — отдельный локальный процесс со своим набором инструментов:
+- project/server.py: get_git_branch и list_project_files фиксированного рабочего корня, только чтение.
+- scheduler/server.py: 11 инструментов к общему SQLite расписаний; модели разрешён более узкий набор в app.py.
+- Filesystem: пакет @modelcontextprotocol/server-filesystem из node_modules приложения.
+  Для своего проекта корень workspace, для внешнего — его root. Модели доступен
+  только безопасный write_file при явной просьбе экспортировать отчёт.
 
-```powershell
-.\.venv\Scripts\python.exe -m mcp_servers.open_meteo.server
-.\.venv\Scripts\python.exe -m mcp_servers.openalex.server
-.\.venv\Scripts\python.exe -m mcp_servers.openaq.server
-.\.venv\Scripts\python.exe -m mcp_servers.scheduler.server
-```
+Жизненный цикл — mcp_manager.py, постоянные запреты — mcp_control.py,
+выбор корней — workspaces.py. Общее разрешение и отдельные переключатели
+Project/Filesystem/Scheduler действуют на все проекты. Остановка соединения
+не равна постоянному запрету. Исполнитель расписаний отделён от Scheduler MCP.
 
-Они используют транспорт `stdio`, поэтому обычно запускаются MCP-клиентом, а
-не вручную в отдельном окне. Open‑Meteo и OpenAlex работают без регистрации.
-Для OpenAQ v3 нужен бесплатный ключ в переменной `OPENAQ_API_KEY`. Не добавляйте
-ключ в репозиторий — храните его в `.env`.
-
-К приложению DeepSeek Agent подключены Open‑Meteo и Scheduler. Scheduler при
-обычном запуске стартует автоматически и использует `data/scheduler.sqlite3`.
-OpenAlex и OpenAQ пока оставлены независимыми для следующих дней.
+Единый пользовательский интерфейс — кнопка MCP рядом с настройками чата.
+[Полное описание управления](../docs/MCP_MANAGEMENT.md),
+[архитектура](../docs/ARCHITECTURE.md). Внешние справочные MCP удалены.

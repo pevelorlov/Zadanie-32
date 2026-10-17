@@ -16,15 +16,7 @@ from typing import Any, Callable
 
 TIMEZONE_NAME = "Asia/Novosibirsk"
 TIMEZONE = timezone(timedelta(hours=7), name=TIMEZONE_NAME)
-KNOWN_MCP_TOOLS = {
-    "open-meteo": {
-        "find_location",
-        "get_current_weather",
-        "get_hourly_forecast",
-        "get_daily_forecast",
-        "get_precipitation_window",
-    },
-}
+KNOWN_MCP_TOOLS = {}
 logger = logging.getLogger("deepseek_agent.scheduler")
 
 

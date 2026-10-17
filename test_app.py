@@ -208,23 +208,10 @@ class FakeRagIndexService:
         return result
 
 
-class ToolAwareFakeProvider(FakeProvider):
-    def complete_with_tools(self, messages, settings, tools, tool_executor):
-        base = super().complete(messages, settings)
-        arguments = {"latitude": 55.03, "longitude": 82.92}
-        output = tool_executor("get_current_weather", arguments)
-        return AgentResult(
-            content="Сейчас 12 °C. Подойдёт лёгкая куртка.",
-            reasoning_content="",
-            technical={**base.technical, "mcp_tool_calls": [{
-                "round": 1, "name": "get_current_weather", "arguments": arguments,
-                "is_error": output["is_error"],
-            }]},
-        )
 
 
-class WeatherReportPipelineProvider(FakeProvider):
-    """Имитирует выбор погоды, обработку моделью и последующую запись отчёта."""
+class ProjectReportPipelineProvider(FakeProvider):
+    """Имитирует подготовку и запись отчёта о проекте."""
 
     def complete(self, messages, settings):
         system = messages[0]["content"]
@@ -241,32 +228,15 @@ class WeatherReportPipelineProvider(FakeProvider):
 
     def complete_with_tools(self, messages, settings, tools, tool_executor):
         base = super().complete(messages, settings)
-        names = {tool["name"] for tool in tools}
-        if not {"get_current_weather", "write_file"}.issubset(names):
-            raise AssertionError(f"Не получены инструменты композиции: {sorted(names)}")
-        weather_arguments = {"latitude": 55.03, "longitude": 82.92}
-        weather = tool_executor("get_current_weather", weather_arguments)
-        temperature = weather["result"]["current"]["temperature_2m"]
-        report = (
-            "# Погодный отчёт для Новосибирска\n\n"
-            f"Температура: {temperature} °C. Для прогулки подойдёт лёгкая куртка.\n"
-        )
-        file_arguments = {"path": "../../чужая-папка/weather.md", "content": report}
-        saved = tool_executor("write_file", file_arguments)
-        relative_path = saved["result"]["relative_path"]
-        return AgentResult(
-            content=f"Прогноз обработан, отчёт сохранён: {relative_path}",
-            reasoning_content="",
-            technical={**base.technical, "mcp_tool_calls": [
-                {"round": 1, "name": "get_current_weather", "arguments": weather_arguments,
-                 "is_error": weather["is_error"]},
-                {"round": 2, "name": "write_file", "arguments": file_arguments,
-                 "is_error": saved["is_error"]},
-            ]},
-        )
+        if "write_file" not in {t["name"] for t in tools}:
+            raise AssertionError("write_file недоступен")
+        arguments = {"path": "../../чужая-папка/project-report.md", "content": "# Отчёт о проекте\n\nПроект использует Flask и DeepSeek API.\n"}
+        saved = tool_executor("write_file", arguments)
+        return AgentResult(content="Отчёт сохранён: " + saved["result"]["relative_path"], reasoning_content="",
+            technical={**base.technical, "mcp_tool_calls": [{"round": 1, "name": "write_file", "arguments": arguments, "is_error": saved["is_error"]}]})
 
 
-class BlockedWeatherReportPipelineProvider(WeatherReportPipelineProvider):
+class BlockedProjectReportPipelineProvider(ProjectReportPipelineProvider):
     def complete(self, messages, settings):
         system = messages[0]["content"]
         if "строгий контроллер этапов" in system and "write_file" in messages[-1]["content"]:
@@ -282,29 +252,6 @@ class BlockedWeatherReportPipelineProvider(WeatherReportPipelineProvider):
         return FakeProvider.complete(self, messages, settings)
 
 
-class OrchestrationFakeProvider(FakeProvider):
-    """Имитирует зависимую цепочку MediaWiki -> World Bank."""
-
-    def complete_with_tools(self, messages, settings, tools, tool_executor):
-        base = super().complete(messages, settings)
-        names = {tool["name"] for tool in tools}
-        if not {"search-page", "worldbank_get_data"}.issubset(names):
-            raise AssertionError(f"Не получены инструменты оркестрации: {sorted(names)}")
-        if "update-page" in names:
-            raise AssertionError("MediaWiki write-инструмент не должен передаваться модели")
-        wiki_args = {"query": "largest countries South America", "limit": 5}
-        wiki = tool_executor("search-page", wiki_args)
-        country_codes = wiki["result"]["country_codes"]
-        bank_args = {"indicator_id": "SP.POP.TOTL", "countries": country_codes, "mrnev": 1}
-        bank = tool_executor("worldbank_get_data", bank_args)
-        return AgentResult(
-            content="MediaWiki определил страны, World Bank вернул показатели населения.",
-            reasoning_content="",
-            technical={**base.technical, "mcp_tool_calls": [
-                {"round": 1, "server": wiki["mcp_server"], "name": "search-page", "arguments": wiki_args, "is_error": False},
-                {"round": 2, "server": bank["mcp_server"], "name": "worldbank_get_data", "arguments": bank_args, "is_error": False},
-            ]},
-        )
 
 
 class MemoryProvider(FakeProvider):
@@ -578,63 +525,8 @@ class FakeMCPManager:
         return self.status()
 
 
-class FakeWeatherMCPManager(FakeMCPManager):
-    def __init__(self, running=False):
-        super().__init__()
-        self.running = running
-        self.called = []
-
-    def status(self):
-        status = super().status()
-        status["server"] = {"name": "open-meteo-test", "version": "1.0.0"} if self.running else {"name": None, "version": None}
-        return status
-
-    def list_tools(self):
-        if not self.running:
-            raise RuntimeError("MCP-соединение не запущено.")
-        self.tools_calls += 1
-        return {**self.status(), "tool_count": 1, "tools": self.tools_for_model()}
-
-    def tools_for_model(self):
-        return [{
-            "name": "get_current_weather", "title": None, "description": "Текущая погода",
-            "input_schema": {"type": "object", "properties": {"latitude": {"type": "number"}, "longitude": {"type": "number"}}},
-        }]
-
-    def call_tool(self, name, arguments):
-        self.called.append((name, arguments))
-        return {"tool": name, "arguments": arguments, "is_error": False, "result": {"current": {"temperature_2m": 12}}}
 
 
-class FakeOrchestrationMCPManager(FakeMCPManager):
-    def __init__(self, server_name, tools, results, running=True):
-        super().__init__()
-        self.server_name = server_name
-        self._tools = tools
-        self.results = results
-        self.running = running
-        self.called = []
-
-    def status(self):
-        status = super().status()
-        status["server"] = {"name": self.server_name, "version": "1.0.0"} if self.running else {"name": None, "version": None}
-        status["tool_count"] = len(self._tools) if self.running else 0
-        return status
-
-    def list_tools(self):
-        if not self.running:
-            raise RuntimeError("MCP-соединение не запущено.")
-        return {**self.status(), "tools": self.tools_for_model()}
-
-    def tools_for_model(self):
-        return [{
-            "name": name, "title": None, "description": name,
-            "input_schema": {"type": "object", "properties": {}},
-        } for name in self._tools]
-
-    def call_tool(self, name, arguments):
-        self.called.append((name, arguments))
-        return {"tool": name, "arguments": arguments, "is_error": False, "result": self.results[name]}
 
 
 class FakeFilesystemWriteMCPManager(FakeMCPManager):
@@ -1304,7 +1196,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="invariant-scope"', text)
         self.assertIn('id="rag-view-button"', text)
         self.assertIn('id="rag-panel"', text)
-        self.assertIn("Построить оба индекса", text)
+        self.assertIn("Обновить документацию проекта и оба индекса", text)
         self.assertIn("Найти в обоих индексах", text)
         self.assertIn('id="chat-rag-enabled"', text)
         self.assertIn('id="rag-compare-form"', text)
@@ -1321,8 +1213,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn('id="mcp-stop"', text)
         self.assertIn('id="mcp-disable-all"', text)
         self.assertIn('id="mcp-enable-all"', text)
-        self.assertIn('id="weather-mcp-start"', text)
-        self.assertIn("Open‑Meteo MCP", text)
+        self.assertNotIn('id="weather-mcp-start"', text)
+        self.assertNotIn("Open‑Meteo MCP", text)
         self.assertIn("только папку проекта <code>workspace</code>", text)
         self.assertIn("Разрешённые категории", text)
         self.assertIn("preferences.language", text)
@@ -1889,66 +1781,6 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(unavailable.status_code, 409)
         self.assertFalse(unavailable.get_json()["mcp"]["connected"])
 
-    def test_master_mcp_switch_stops_every_server_and_blocks_restart(self):
-        data_dir = Path(self.temp.name) / "mcp-control"
-        filesystem = FakeMCPManager()
-        filesystem.running = True
-        weather = FakeWeatherMCPManager(running=True)
-        scheduler_mcp = FakeMCPManager()
-        scheduler_mcp.running = True
-        mediawiki = FakeOrchestrationMCPManager("mediawiki-test", ["search-page"], {}, running=True)
-        worldbank = FakeOrchestrationMCPManager("worldbank-test", ["worldbank_get_data"], {}, running=True)
-        app = create_app(
-            data_dir,
-            Agent(FakeProvider()),
-            self.voice,
-            filesystem,
-            weather,
-            scheduler_mcp_manager=scheduler_mcp,
-            mediawiki_mcp_manager=mediawiki,
-            worldbank_mcp_manager=worldbank,
-        )
-        app.config.update(TESTING=True)
-        client = app.test_client()
-
-        disabled = client.post("/api/mcp-control/disable", json={})
-        self.assertEqual(disabled.status_code, 200)
-        self.assertFalse(disabled.get_json()["control"]["enabled"])
-        for manager in (filesystem, weather, scheduler_mcp, mediawiki, worldbank):
-            self.assertFalse(manager.running)
-            self.assertEqual(manager.stop_calls, 1)
-        saved = json.loads((data_dir / "mcp_control.json").read_text(encoding="utf-8"))
-        self.assertFalse(saved["enabled"])
-
-        self.assertEqual(client.post("/api/mcp/start").status_code, 409)
-        self.assertEqual(client.post("/api/weather-mcp/start").status_code, 409)
-        self.assertEqual(client.post("/api/orchestration-mcp/mediawiki/start").status_code, 409)
-        self.assertEqual(client.get("/api/scheduler/tools").status_code, 409)
-
-        restarted_mediawiki = FakeOrchestrationMCPManager("mediawiki-test", ["search-page"], {}, running=False)
-        restarted_worldbank = FakeOrchestrationMCPManager("worldbank-test", ["worldbank_get_data"], {}, running=False)
-        restarted = create_app(
-            data_dir,
-            Agent(FakeProvider()),
-            self.voice,
-            FakeMCPManager(),
-            FakeWeatherMCPManager(),
-            scheduler_mcp_manager=FakeMCPManager(),
-            mediawiki_mcp_manager=restarted_mediawiki,
-            worldbank_mcp_manager=restarted_worldbank,
-            orchestration_autostart=True,
-        )
-        restarted.config.update(TESTING=True)
-        self.assertFalse(restarted.test_client().get("/api/mcp-control").get_json()["control"]["enabled"])
-        self.assertEqual(restarted_mediawiki.start_calls, 0)
-        self.assertEqual(restarted_worldbank.start_calls, 0)
-
-        enabled = client.post("/api/mcp-control/enable", json={})
-        self.assertEqual(enabled.status_code, 200)
-        self.assertTrue(enabled.get_json()["control"]["enabled"])
-        self.assertFalse(filesystem.running)
-        self.assertEqual(client.post("/api/mcp/start").status_code, 200)
-        self.assertTrue(filesystem.running)
 
     def test_master_task_switch_bypasses_lifecycle_and_persists(self):
         data_dir = Path(self.temp.name) / "task-control"
@@ -2007,144 +1839,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(filesystem.start_calls, 0)
         self.assertEqual(filesystem.called, [])
 
-    def test_weather_mcp_has_separate_lifecycle_routes(self):
-        weather = FakeWeatherMCPManager()
-        app = create_app(Path(self.temp.name), Agent(self.provider), self.voice, self.mcp, weather)
-        app.config.update(TESTING=True)
-        client = app.test_client()
-        started = client.post("/api/weather-mcp/start")
-        self.assertEqual(started.status_code, 200)
-        self.assertEqual(started.get_json()["mcp"]["server"]["name"], "open-meteo-test")
-        self.assertEqual(started.get_json()["mcp"]["tools"][0]["name"], "get_current_weather")
-        self.assertEqual(client.post("/api/weather-mcp/stop").status_code, 200)
 
-    def test_chat_uses_connected_weather_mcp_and_saves_audit(self):
-        provider = ToolAwareFakeProvider()
-        weather = FakeWeatherMCPManager(running=True)
-        app = create_app(Path(self.temp.name), Agent(provider), self.voice, self.mcp, weather)
-        app.config.update(TESTING=True)
-        client = app.test_client()
-        conversation = client.post("/api/conversations", json={"title": "Погода"}).get_json()["conversation"]
-        response = client.post(f"/api/conversations/{conversation['id']}/messages", json={
-            "content": "Что надеть в Новосибирске?", "settings": AgentSettings().to_dict(),
-        })
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(weather.called[0][0], "get_current_weather")
-        assistant = response.get_json()["conversation"]["visible_messages"][-1]
-        self.assertIn("лёгкая куртка", assistant["content"])
-        self.assertEqual(assistant["technical"]["mcp_tool_calls"][0]["name"], "get_current_weather")
-        self.assertEqual(self.mcp.start_calls, 0)
 
-    def test_auto_routing_uses_connected_weather_tool_and_marks_external_source(self):
-        provider = ToolAwareFakeProvider()
-        weather = FakeWeatherMCPManager(running=True)
-        rag = FakeRagIndexService()
-        app = create_app(
-            Path(self.temp.name) / "auto-weather", Agent(provider), self.voice, self.mcp,
-            weather_mcp_manager=weather, rag_index_service=rag,
-        )
-        app.config.update(TESTING=True)
-        client = app.test_client()
-        conversation = client.post("/api/conversations", json={"title": "Авто-погода"}).get_json()["conversation"]
-        response = client.post(f"/api/conversations/{conversation['id']}/messages", json={
-            "content": "Получи актуальную погоду через API и посоветуй одежду.",
-            "settings": AgentSettings().to_dict(),
-            "rag": {
-                "enabled": True, "verified": True, "routing_mode": "auto",
-                "strategy": "combined", "mode": "combined",
-                "candidate_k": 20, "final_k": 5, "similarity_threshold": 0.83,
-            },
-        })
-        self.assertEqual(response.status_code, 200)
-        assistant = response.get_json()["conversation"]["visible_messages"][-1]
-        self.assertEqual(assistant["technical"]["rag"]["routing"]["route"], "tools")
-        self.assertEqual(weather.called[0][0], "get_current_weather")
-        self.assertIn("Внешние MCP-инструменты: get_current_weather", assistant["content"])
-        self.assertNotIn("Цитаты:", assistant["content"])
 
-    def test_auto_hybrid_route_combines_document_context_and_real_tool_source(self):
-        provider = ToolAwareFakeProvider()
-        weather = FakeWeatherMCPManager(running=True)
-        rag = FakeRagIndexService()
-        app = create_app(
-            Path(self.temp.name) / "auto-hybrid", Agent(provider), self.voice, self.mcp,
-            weather_mcp_manager=weather, rag_index_service=rag,
-        )
-        app.config.update(TESTING=True)
-        client = app.test_client()
-        conversation = client.post("/api/conversations", json={"title": "Hybrid"}).get_json()["conversation"]
-        response = client.post(f"/api/conversations/{conversation['id']}/messages", json={
-            "content": "Сопоставь рекомендации из документа и актуальную погоду через API.",
-            "settings": AgentSettings().to_dict(),
-            "rag": {
-                "enabled": True, "verified": True, "routing_mode": "auto",
-                "strategy": "combined", "mode": "combined",
-                "candidate_k": 20, "final_k": 5, "similarity_threshold": 0.83,
-            },
-        })
-        self.assertEqual(response.status_code, 200)
-        assistant = response.get_json()["conversation"]["visible_messages"][-1]
-        self.assertEqual(assistant["technical"]["rag"]["routing"]["route"], "hybrid")
-        self.assertEqual(weather.called[0][0], "get_current_weather")
-        self.assertIn("Локальная база: source.pdf", assistant["content"])
-        self.assertIn("Внешние MCP-инструменты: get_current_weather", assistant["content"])
-        generation = policy_generation_calls(provider)[0][0][0]["content"]
-        self.assertIn("ДОКУМЕНТАЛЬНЫЙ КОНТЕКСТ RAG", generation)
-        self.assertIn("АВТОМАРШРУТ HYBRID", generation)
-        self.assertNotIn("ПРОВЕРЯЕМЫЙ RAG", generation)
 
-    def test_day20_routes_dependent_calls_across_two_mcp_servers_and_tracks_activity(self):
-        mediawiki = FakeOrchestrationMCPManager(
-            "mediawiki-test", ["search-page", "update-page"],
-            {"search-page": {"country_codes": ["BRA", "ARG"]}},
-        )
-        worldbank = FakeOrchestrationMCPManager(
-            "worldbank-test", ["worldbank_get_data"],
-            {"worldbank_get_data": {"observations": [{"country": "BRA", "value": 1}]}},
-        )
-        app = create_app(
-            Path(self.temp.name), Agent(OrchestrationFakeProvider()), self.voice, self.mcp,
-            mediawiki_mcp_manager=mediawiki, worldbank_mcp_manager=worldbank,
-        )
-        app.config.update(TESTING=True)
-        client = app.test_client()
-        conversation = client.post("/api/conversations", json={"title": "Оркестрация"}).get_json()["conversation"]
-        activity_id = "a" * 32
 
-        response = client.post(f"/api/conversations/{conversation['id']}/messages", json={
-            "content": "Найди крупнейшие страны Южной Америки и сравни население.",
-            "mcp_activity_id": activity_id,
-            "settings": AgentSettings().to_dict(),
-        })
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual([item[0] for item in mediawiki.called], ["search-page"])
-        self.assertEqual(worldbank.called[0][1]["countries"], ["BRA", "ARG"])
-        assistant = response.get_json()["conversation"]["visible_messages"][-1]
-        calls = assistant["technical"]["mcp_tool_calls"]
-        self.assertEqual([(item["server"], item["name"]) for item in calls], [
-            ("mediawiki", "search-page"), ("worldbank", "worldbank_get_data"),
-        ])
-        activity = client.get(f"/api/mcp/activity/{activity_id}").get_json()["activity"]
-        self.assertEqual(activity["phase"], "completed")
-        self.assertEqual([(item["server"], item["name"], item["status"]) for item in activity["calls"]], [
-            ("mediawiki", "search-page", "completed"),
-            ("worldbank", "worldbank_get_data", "completed"),
-        ])
-
-    def test_day20_mcp_lifecycle_routes_are_independent(self):
-        mediawiki = FakeOrchestrationMCPManager("mediawiki-test", ["search-page"], {}, running=False)
-        worldbank = FakeOrchestrationMCPManager("worldbank-test", ["worldbank_get_data"], {}, running=False)
-        app = create_app(
-            Path(self.temp.name), Agent(self.provider), self.voice, self.mcp,
-            mediawiki_mcp_manager=mediawiki, worldbank_mcp_manager=worldbank,
-        )
-        app.config.update(TESTING=True)
-        client = app.test_client()
-        self.assertEqual(client.post("/api/orchestration-mcp/mediawiki/start").status_code, 200)
-        self.assertEqual(client.post("/api/orchestration-mcp/worldbank/start").status_code, 200)
-        self.assertEqual(client.get("/api/orchestration-mcp/mediawiki/tools").get_json()["mcp"]["tools"][0]["name"], "search-page")
-        self.assertEqual(client.get("/api/orchestration-mcp/worldbank/tools").get_json()["mcp"]["tools"][0]["name"], "worldbank_get_data")
 
     def test_file_export_intent_requires_explicit_positive_command(self):
         self.assertTrue(app_module.requests_file_export("Узнай погоду и сохрани отчёт в файл"))
@@ -2152,49 +1851,47 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(app_module.requests_file_export("Что надеть сегодня?"))
         self.assertFalse(app_module.requests_file_export("Покажи прогноз, но не сохраняй его"))
 
-    def test_weather_report_pipeline_starts_filesystem_and_writes_unique_report(self):
-        provider = WeatherReportPipelineProvider()
-        weather = FakeWeatherMCPManager(running=True)
+    def test_project_report_pipeline_starts_filesystem_and_writes_unique_report(self):
+        provider = ProjectReportPipelineProvider()
         workspace = Path(self.temp.name) / "mcp-workspace"
         filesystem = FakeFilesystemWriteMCPManager(workspace)
-        app = create_app(Path(self.temp.name), Agent(provider), self.voice, filesystem, weather)
+        app = create_app(Path(self.temp.name), Agent(provider), self.voice, filesystem)
         app.config.update(TESTING=True)
         client = app.test_client()
-        conversation = client.post("/api/conversations", json={"title": "Погодный отчёт"}).get_json()["conversation"]
+        conversation = client.post("/api/conversations", json={"title": "Проектный отчёт"}).get_json()["conversation"]
 
         response = client.post(f"/api/conversations/{conversation['id']}/messages", json={
-            "content": "Узнай погоду в Новосибирске, посоветуй одежду и сохрани отчёт в файл.",
+            "content": "Составь краткое описание проекта и сохрани отчёт в файл.",
             "settings": AgentSettings().to_dict(),
         })
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(filesystem.start_calls, 1)
-        self.assertEqual([item[0] for item in weather.called], ["get_current_weather"])
         self.assertEqual([item[0] for item in filesystem.called], ["write_file"])
         written_path = Path(filesystem.called[0][1]["path"])
         self.assertEqual(written_path.parent, workspace / "reports")
-        self.assertRegex(written_path.name, r"^weather-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.md$")
+        self.assertRegex(written_path.name, r"^project-report-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.md$")
         self.assertTrue(written_path.is_file())
-        self.assertIn("Температура: 12 °C", written_path.read_text(encoding="utf-8"))
+        self.assertIn("Flask и DeepSeek API", written_path.read_text(encoding="utf-8"))
         assistant = response.get_json()["conversation"]["visible_messages"][-1]
         self.assertEqual(
             [item["name"] for item in assistant["technical"]["mcp_tool_calls"]],
-            ["get_current_weather", "write_file"],
+            ["write_file"],
         )
         self.assertEqual(assistant["technical"]["policy_audit"]["detected_action_type"], "file_export")
 
+
     def test_blocked_file_export_removes_report_created_before_postvalidation(self):
-        provider = BlockedWeatherReportPipelineProvider()
-        weather = FakeWeatherMCPManager(running=True)
+        provider = BlockedProjectReportPipelineProvider()
         workspace = Path(self.temp.name) / "blocked-workspace"
         filesystem = FakeFilesystemWriteMCPManager(workspace)
-        app = create_app(Path(self.temp.name), Agent(provider), self.voice, filesystem, weather)
+        app = create_app(Path(self.temp.name), Agent(provider), self.voice, filesystem)
         app.config.update(TESTING=True)
         client = app.test_client()
         conversation = client.post("/api/conversations", json={"title": "Заблокированный отчёт"}).get_json()["conversation"]
 
         response = client.post(f"/api/conversations/{conversation['id']}/messages", json={
-            "content": "Сохрани погодный отчёт в файл.", "settings": AgentSettings().to_dict(),
+            "content": "Сохрани проектный отчёт в файл.", "settings": AgentSettings().to_dict(),
         })
 
         self.assertEqual(response.status_code, 200)
@@ -2202,6 +1899,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(assistant["technical"]["request_status"], "blocked")
         self.assertIn("Ответ заблокирован", assistant["content"])
         self.assertEqual(list((workspace / "reports").glob("*.md")), [])
+
 
     def test_task_lifecycle_controls_transitions_pause_and_resume(self):
         conversation = self.create_conversation()

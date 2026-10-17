@@ -9,42 +9,11 @@ from unittest import mock
 
 from mcp.server.mcpserver.exceptions import ToolError
 
-from mcp_manager import OpenMeteoMCPManager, SchedulerMCPManager, StdioMCPManager
-from mcp_servers.open_meteo import server as meteo
-from mcp_servers.openaq import server as openaq
+from mcp_manager import ProjectMCPManager, SchedulerMCPManager, StdioMCPManager
 
 
-class OpenMeteoToolTests(unittest.TestCase):
-    def test_find_location_returns_compact_locations(self):
-        with mock.patch.object(meteo, "get_json", return_value={"results": [{
-            "id": 1, "name": "Новосибирск", "latitude": 55.03, "longitude": 82.92,
-            "timezone": "Asia/Novosibirsk", "country": "Россия", "unused": "value",
-        }]}):
-            result = meteo.find_location("Новосибирск")
-        self.assertEqual(result["locations"][0]["name"], "Новосибирск")
-        self.assertNotIn("unused", result["locations"][0])
-
-    def test_precipitation_window_aggregates_first_continuous_period(self):
-        payload = {
-            "hourly": {
-                "time": ["10:00", "11:00", "12:00", "13:00"],
-                "precipitation_probability": [10, 45, 80, 10],
-                "precipitation": [0, 0.2, 1.1, 0],
-            }
-        }
-        with mock.patch.object(meteo, "get_json", return_value=payload):
-            result = meteo.get_precipitation_window(55, 83, probability_threshold=30)
-        self.assertTrue(result["found"])
-        self.assertEqual(result["window"]["start"], "11:00")
-        self.assertEqual(result["window"]["end"], "12:00")
-        self.assertEqual(result["window"]["peak_probability_percent"], 80)
 
 
-class OpenAQToolTests(unittest.TestCase):
-    def test_missing_key_has_clear_error(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(ToolError, "OPENAQ_API_KEY"):
-                openaq.get_latest_measurements(123)
 
 
 class MCPRegistrationTests(unittest.TestCase):
@@ -76,18 +45,7 @@ class MCPRegistrationTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         definitions = {
-            "open-meteo": (OpenMeteoMCPManager(project_dir), {
-                "find_location", "get_current_weather", "get_hourly_forecast",
-                "get_daily_forecast", "get_precipitation_window",
-            }),
-            "openalex": (StdioMCPManager(
-                command=sys.executable, args=["-m", "mcp_servers.openalex.server"],
-                process_name="openalex-test", starting_message="start",
-            ), {"search_works", "get_work", "search_authors"}),
-            "openaq": (StdioMCPManager(
-                command=sys.executable, args=["-m", "mcp_servers.openaq.server"],
-                process_name="openaq-test", starting_message="start",
-            ), {"find_air_quality_locations", "get_location_details", "get_latest_measurements"}),
+            "project": (ProjectMCPManager(project_dir), {"get_git_branch", "list_project_files"}),
             "scheduler": (SchedulerMCPManager(project_dir, Path(temporary.name) / "scheduler.sqlite3"), {
                 "create_scheduled_task", "list_scheduled_tasks", "get_scheduled_task",
                 "update_scheduled_task", "pause_scheduled_task", "resume_scheduled_task",

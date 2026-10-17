@@ -50,3 +50,41 @@ class PersistentFeatureControl:
 
 
 MCPControl = PersistentFeatureControl
+
+
+class MCPServerControl(PersistentFeatureControl):
+    """Независимые разрешения типов серверов для всех рабочих проектов."""
+
+    SERVERS = ("project", "filesystem", "scheduler")
+
+    def state(self) -> dict:
+        with self._lock:
+            if not self.path.exists():
+                return {name: True for name in self.SERVERS}
+            try:
+                value = json.loads(self.path.read_text(encoding="utf-8"))
+                if not isinstance(value, dict):
+                    raise ValueError("Invalid controls")
+                return {name: value.get(name) is True for name in self.SERVERS}
+            except (OSError, ValueError):
+                return {name: False for name in self.SERVERS}
+
+    def is_enabled(self, server: str) -> bool:
+        if server not in self.SERVERS:
+            return False
+        return self.state()[server]
+
+    def set_enabled(self, server: str, enabled: bool) -> dict:
+        if server not in self.SERVERS:
+            raise ValueError("Неизвестный MCP-сервер.")
+        with self._lock:
+            state = self.state()
+            state[server] = bool(enabled)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(temporary, self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return state

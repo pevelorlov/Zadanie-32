@@ -264,9 +264,9 @@ class StdioMCPManager:
 class MCPManager(StdioMCPManager):
     """Совместимый менеджер Filesystem MCP из Дня 16."""
 
-    def __init__(self, project_dir: Path, timeout_seconds: float = 20.0) -> None:
+    def __init__(self, project_dir: Path, timeout_seconds: float = 20.0, workspace_root: Path | None = None) -> None:
         project_dir = Path(project_dir).resolve()
-        workspace = (project_dir / "workspace").resolve()
+        workspace = Path(workspace_root).resolve() if workspace_root is not None else (project_dir / "workspace").resolve()
         server_script = (project_dir / "node_modules" / "@modelcontextprotocol" / "server-filesystem" / "dist" / "index.js").resolve()
 
         def validate() -> None:
@@ -274,7 +274,7 @@ class MCPManager(StdioMCPManager):
                 raise RuntimeError("Node.js не найден. Установите Node.js 18+ и повторите запуск.")
             if not server_script.is_file():
                 raise RuntimeError("Filesystem MCP Server не установлен. Выполните в папке проекта: npm install")
-            if workspace.parent != project_dir:
+            if workspace_root is None and workspace.parent != project_dir:
                 raise RuntimeError("Папка MCP workspace должна находиться внутри проекта.")
             workspace.mkdir(parents=True, exist_ok=True)
 
@@ -283,20 +283,18 @@ class MCPManager(StdioMCPManager):
                          workspace=workspace, timeout_seconds=timeout_seconds)
 
 
-class OpenMeteoMCPManager(StdioMCPManager):
-    """Менеджер собственного Open-Meteo MCP-сервера Дня 17."""
+class ProjectMCPManager(StdioMCPManager):
+    """Read-only инструменты Git и структуры исходников ассистента."""
 
-    def __init__(self, project_dir: Path, timeout_seconds: float = 30.0) -> None:
-        project_dir = Path(project_dir).resolve()
-        module_file = project_dir / "mcp_servers" / "open_meteo" / "server.py"
-
-        def validate() -> None:
-            if not module_file.is_file():
-                raise RuntimeError("Не найден mcp_servers/open_meteo/server.py.")
-
-        super().__init__(command=sys.executable, args=["-m", "mcp_servers.open_meteo.server"], process_name="open-meteo-mcp",
-                         starting_message="Запускаем Open-Meteo MCP Server…", installation_validator=validate,
+    def __init__(self, project_dir: Path, timeout_seconds: float = 25.0) -> None:
+        root = Path(project_dir).resolve()
+        super().__init__(command=sys.executable,
+                         args=[str(Path(__file__).resolve().parent / "mcp_servers" / "project" / "server.py")],
+                         process_name="project-mcp", starting_message="Подключаем проект…",
+                         environment={"DEEPSEEK_PROJECT_ROOT": str(root)},
                          timeout_seconds=timeout_seconds)
+
+
 
 
 class SchedulerMCPManager(StdioMCPManager):
@@ -318,64 +316,4 @@ class SchedulerMCPManager(StdioMCPManager):
             installation_validator=validate,
             timeout_seconds=timeout_seconds,
             environment={"DEEPSEEK_SCHEDULER_DB": str(Path(database_path).resolve())},
-        )
-
-
-class NodePackageMCPManager(StdioMCPManager):
-    """Запускает установленный в проекте Node.js MCP-сервер без npx и сети."""
-
-    def __init__(self, project_dir: Path, *, package_path: str, process_name: str,
-                 starting_message: str, environment: dict[str, str] | None = None,
-                 timeout_seconds: float = 30.0) -> None:
-        project_dir = Path(project_dir).resolve()
-        server_script = (project_dir / "node_modules" / Path(package_path) / "dist" / "index.js").resolve()
-
-        def validate() -> None:
-            if shutil.which("node") is None:
-                raise RuntimeError("Node.js не найден. Установите Node.js и повторите запуск.")
-            if not server_script.is_file():
-                raise RuntimeError(f"MCP-пакет {package_path} не установлен. Выполните в папке проекта: npm install")
-
-        super().__init__(
-            command="node",
-            args=[str(server_script)],
-            process_name=process_name,
-            starting_message=starting_message,
-            installation_validator=validate,
-            timeout_seconds=timeout_seconds,
-            environment=environment,
-        )
-
-
-class MediaWikiMCPManager(NodePackageMCPManager):
-    """ProfessionalWiki MediaWiki MCP с анонимным read-only доступом к Wikipedia."""
-
-    def __init__(self, project_dir: Path, timeout_seconds: float = 30.0) -> None:
-        project_dir = Path(project_dir).resolve()
-        config_file = (project_dir / "config" / "mediawiki_mcp.json").resolve()
-        super().__init__(
-            project_dir,
-            package_path="@professional-wiki/mediawiki-mcp-server",
-            process_name="mediawiki-mcp",
-            starting_message="Запускаем ProfessionalWiki MediaWiki MCP Server…",
-            environment={
-                "CONFIG": str(config_file),
-                "MCP_TRANSPORT": "stdio",
-                "MCP_LOG_LEVEL": "error",
-            },
-            timeout_seconds=timeout_seconds,
-        )
-
-
-class WorldBankMCPManager(NodePackageMCPManager):
-    """World Bank Open Data MCP без API-ключа."""
-
-    def __init__(self, project_dir: Path, timeout_seconds: float = 40.0) -> None:
-        super().__init__(
-            project_dir,
-            package_path="@cyanheads/worldbank-mcp-server",
-            process_name="worldbank-mcp",
-            starting_message="Запускаем World Bank MCP Server…",
-            environment={"MCP_TRANSPORT_TYPE": "stdio", "MCP_LOG_LEVEL": "error"},
-            timeout_seconds=timeout_seconds,
         )

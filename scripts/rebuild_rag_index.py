@@ -12,10 +12,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from document_index import RagIndexService
+from developer_help import ProjectDocumentation
 
 
 def main() -> int:
     service = RagIndexService(ROOT / "rag_documents", ROOT / "data" / "rag_index.sqlite3")
+    ProjectDocumentation(ROOT, service.documents_dir).sync()
     latest = service.state().get("latest_run") or {}
     settings = latest.get("settings") or {
         "fixed_chunk_size": 350,

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, g, jsonify, render_template, request, send_file
+from flask import Flask, abort, g, jsonify, render_template, request, send_file
 
 from artifacts import (
     ArtifactError,
@@ -82,14 +82,14 @@ from document_index import (
     validate_and_format_evidence,
 )
 from document_index.evaluations import RagEvaluationStore
-from mcp_control import PersistentFeatureControl
+from developer_help import HELP_TEXT, ProjectDocumentation, parse_help, project_context, source_appendix
+from workspaces import WorkspaceService
+from mcp_control import PersistentFeatureControl, MCPServerControl
 from mcp_manager import (
     MCPManager,
-    MediaWikiMCPManager,
-    OpenMeteoMCPManager,
+    ProjectMCPManager,
     SchedulerMCPManager,
     StdioMCPManager,
-    WorldBankMCPManager,
 )
 from presets import PresetManager
 from scheduler import SchedulerRepository, SchedulerService, TIMEZONE_NAME, scheduler_now
@@ -141,15 +141,6 @@ SCHEDULER_MODEL_TOOLS = {
     "get_scheduled_task_runs", "get_scheduler_summary", "get_scheduler_capabilities",
 }
 FILESYSTEM_MODEL_TOOLS = {"write_file"}
-MEDIAWIKI_MODEL_TOOLS = {
-    "search-page", "search-page-by-prefix", "get-page", "get-pages",
-    "get-category-members", "get-site-info",
-}
-WORLDBANK_MODEL_TOOLS = {
-    "worldbank_list_topics", "worldbank_list_sources", "worldbank_list_countries",
-    "worldbank_get_country", "worldbank_search_indicators", "worldbank_get_indicator",
-    "worldbank_get_data", "worldbank_get_poverty", "worldbank_search_projects",
-}
 _FILE_EXPORT_NEGATIONS = (
     "не сохраняй", "не сохранять", "без сохранения", "не записывай",
     "не записывать", "не создавай файл", "не создавай отчёт", "не создавай отчет",
@@ -268,6 +259,9 @@ def strip_rag_evidence_appendix(text: str) -> str:
     """Оставляет смысл ответа, не возвращая старые источники и цитаты в новый контекст."""
     value = str(text or "")
     marker = re.search(r"\n\s*Источники(?: маршрута)?:\s*\n", value, flags=re.IGNORECASE)
+    developer_marker = re.search(r"\n\s*---\s*\n\*\*Источники контекста:\*\*", value)
+    if developer_marker and (not marker or developer_marker.start() < marker.start()):
+        marker = developer_marker
     if marker:
         value = value[:marker.start()]
         value = re.sub(r"\s*\[\d+]", "", value)
@@ -366,10 +360,10 @@ def unique_report_path(workspace: Path, requested_path: Any) -> Path:
     """Создаёт уникальный Markdown-путь строго внутри workspace/reports."""
     reports_dir = (workspace.resolve() / "reports").resolve()
     reports_dir.mkdir(parents=True, exist_ok=True)
-    raw_name = Path(str(requested_path or "weather-report").replace("\\", "/")).name
-    stem = Path(raw_name).stem.strip() or "weather-report"
+    raw_name = Path(str(requested_path or "project-report").replace("\\", "/")).name
+    stem = Path(raw_name).stem.strip() or "project-report"
     safe_stem = re.sub(r"[^0-9A-Za-zА-Яа-яЁё._-]+", "-", stem).strip(" .-_")[:80]
-    safe_stem = safe_stem or "weather-report"
+    safe_stem = safe_stem or "project-report"
     timestamp = scheduler_now().strftime("%Y-%m-%d-%H-%M-%S")
     candidate = reports_dir / f"{safe_stem}-{timestamp}.md"
     if candidate.exists():
@@ -382,13 +376,9 @@ def create_app(
     agent_instance: Agent | None = None,
     voice_service: WhisperService | None = None,
     mcp_manager: MCPManager | None = None,
-    weather_mcp_manager: StdioMCPManager | None = None,
     scheduler_mcp_manager: StdioMCPManager | None = None,
     scheduler_service: SchedulerService | None = None,
     scheduler_autostart: bool = False,
-    mediawiki_mcp_manager: StdioMCPManager | None = None,
-    worldbank_mcp_manager: StdioMCPManager | None = None,
-    orchestration_autostart: bool = False,
     rag_index_service: RagIndexService | None = None,
 ) -> Flask:
     flask_app = Flask(__name__)
@@ -401,21 +391,26 @@ def create_app(
     invariant_store = InvariantStore(storage.data_dir)
     whisper = voice_service or WhisperService(BASE_DIR, autostart=data_dir is None)
     mcp = mcp_manager or MCPManager(BASE_DIR)
-    weather_mcp = weather_mcp_manager or OpenMeteoMCPManager(BASE_DIR)
+    project_mcp = ProjectMCPManager(BASE_DIR)
     scheduler_repository = (
         scheduler_service.repository if scheduler_service is not None
         else SchedulerRepository(storage.data_dir / "scheduler.sqlite3")
     )
     scheduler_mcp = scheduler_mcp_manager or SchedulerMCPManager(BASE_DIR, scheduler_repository.database_path)
-    mediawiki_mcp = mediawiki_mcp_manager or MediaWikiMCPManager(BASE_DIR)
-    worldbank_mcp = worldbank_mcp_manager or WorldBankMCPManager(BASE_DIR)
     scheduler = scheduler_service or SchedulerService(scheduler_repository)
     rag_index = rag_index_service or RagIndexService(
         (BASE_DIR / "rag_documents") if data_dir is None else (storage.data_dir / "rag_documents"),
         storage.data_dir / "rag_index.sqlite3",
     )
     rag_evaluations = RagEvaluationStore(storage.data_dir / "rag_evaluations.json")
+    workspace_evaluations = {None: rag_evaluations}
+    project_docs = ProjectDocumentation(BASE_DIR, getattr(rag_index, "documents_dir", storage.data_dir / "rag_documents"))
+    workspaces = WorkspaceService(storage, BASE_DIR, rag_index, project_docs, project_mcp, mcp)
     mcp_control = PersistentFeatureControl(storage.data_dir / "mcp_control.json")
+    mcp_server_control = MCPServerControl(storage.data_dir / "mcp_server_control.json")
+
+    def server_allowed(name):
+        return mcp_control.is_enabled() and mcp_server_control.is_enabled(name)
     task_control = PersistentFeatureControl(storage.data_dir / "task_control.json")
     mcp_activity_lock = threading.RLock()
     mcp_activities: dict[str, dict[str, Any]] = {}
@@ -427,23 +422,52 @@ def create_app(
     flask_app.extensions["invariant_store"] = invariant_store
     flask_app.extensions["whisper_service"] = whisper
     flask_app.extensions["mcp_manager"] = mcp
-    flask_app.extensions["weather_mcp_manager"] = weather_mcp
+    flask_app.extensions["project_mcp_manager"] = project_mcp
+    flask_app.extensions["project_documentation"] = project_docs
+    flask_app.extensions["workspace_service"] = workspaces
     flask_app.extensions["scheduler_mcp_manager"] = scheduler_mcp
-    flask_app.extensions["mediawiki_mcp_manager"] = mediawiki_mcp
-    flask_app.extensions["worldbank_mcp_manager"] = worldbank_mcp
     flask_app.extensions["scheduler_service"] = scheduler
     flask_app.extensions["rag_index_service"] = rag_index
     flask_app.extensions["rag_evaluation_store"] = rag_evaluations
     flask_app.extensions["mcp_control"] = mcp_control
+    flask_app.extensions["mcp_server_control"] = mcp_server_control
     flask_app.extensions["task_control"] = task_control
     logger.info("Flask-приложение создано | data_dir=%s", storage.data_dir)
 
     def current_profile_id() -> str:
         return _profile_override.get() or storage.active_profile_id()
 
-    def mcp_blocked_response():
+    def current_workspace():
+        if not hasattr(g, "workspace"):
+            conversation_id = (request.view_args or {}).get("conversation_id")
+            if conversation_id:
+                project_id = accessible_conversation(conversation_id).get("project_id")
+            else:
+                project_id = request.args.get("workspace_project_id")
+            if project_id is None and not conversation_id:
+                project_id = (accessible_conversation(conversation_id).get("project_id") if conversation_id
+                              else workspaces.active(current_profile_id()))
+            try:
+                g.workspace = workspaces.get(project_id or None, current_profile_id())
+            except (FileNotFoundError, PermissionError):
+                abort(404)
+        return g.workspace
+
+    def current_rag_index():
+        return current_workspace().rag
+
+    def current_evaluation_store():
+        workspace = current_workspace()
+        with workspaces.lock:
+            if workspace.id not in workspace_evaluations:
+                workspace_evaluations[workspace.id] = RagEvaluationStore(
+                    storage.data_dir / "workspaces" / workspace.id / "rag_evaluations.json")
+            return workspace_evaluations[workspace.id]
+
+    def mcp_blocked_response(server=None):
         return api_error(
-            "Все MCP принудительно отключены. Сначала нажмите «Разрешить MCP».",
+            ("Все MCP принудительно отключены. Сначала нажмите «Разрешить MCP»."
+             if not mcp_control.is_enabled() else f"MCP-сервер {server} отключён. Разрешите его в окне MCP."),
             409,
         )
 
@@ -676,7 +700,7 @@ def create_app(
     ) -> dict[str, Any]:
         mode = options.get("mode", "baseline")
         if mode == "baseline":
-            return rag_index.retrieve(question, options["strategy"], options["final_k"])
+            return current_rag_index().retrieve(question, options["strategy"], options["final_k"])
         rewrite_value = None
         rewrite_audit = None
         if mode in {"rewrite", "combined"}:
@@ -684,7 +708,7 @@ def create_app(
                 question, settings, retrieval_context,
             )
         if mode == "combined" and retrieval_context:
-            retrieval = rag_index.retrieve_conversational(
+            retrieval = current_rag_index().retrieve_conversational(
                 question,
                 rewrite_value or question,
                 strategy=options["strategy"],
@@ -694,7 +718,7 @@ def create_app(
                 direct_weight=0.7,
             )
         else:
-            retrieval = rag_index.retrieve_pipeline(
+            retrieval = current_rag_index().retrieve_pipeline(
                 question,
                 strategy=options["strategy"],
                 mode=mode,
@@ -721,7 +745,7 @@ def create_app(
             gated = apply_relevance_gate(retrieval, options["similarity_threshold"])
             gated["gate_phase"] = "contextual_preflight"
             return gated
-        preflight = rag_index.retrieve(question, options["strategy"], options["candidate_k"])
+        preflight = current_rag_index().retrieve(question, options["strategy"], options["candidate_k"])
         gated_preflight = apply_relevance_gate(preflight, options["similarity_threshold"])
         gated_preflight["gate_phase"] = "preflight"
         if not gated_preflight["chunks"]:
@@ -857,8 +881,10 @@ def create_app(
         conversation["rag_evidence_ledger"] = list(existing.values())[-30:]
 
     def known_rag_questions() -> dict[str, dict[str, Any]]:
+        if current_workspace().id is not None:
+            return {}
         questions: dict[str, dict[str, Any]] = {}
-        for filename in ("day22_control_questions.json", "day24_control_questions.json"):
+        for filename in ("day31_control_questions.json",):
             path = BASE_DIR / "docs" / filename
             if not path.exists():
                 continue
@@ -961,35 +987,29 @@ def create_app(
         tool_context: dict[str, Any] | None = None,
     ) -> AgentResult:
         """Генерирует черновик и не выпускает его без независимой проверки политики."""
+        workspace = current_workspace()
+        mcp = workspace.filesystem
+        if workspace.id is not None and not workspace.rag.store.latest_run():
+            rag_context += "\nДокументация проекта ещё не проиндексирована. RAG-источников нет; используй сведения рабочего проекта и доступные инструменты, не выдумывай содержимое файлов.\n"
         available_tools: list[dict[str, Any]] = []
         tool_owners: dict[str, str] = {}
         created_scheduler_tasks: list[tuple[str, str]] = []
         created_report_paths: list[Path] = []
-        mcp_enabled = mcp_control.is_enabled()
+        if server_allowed("project") and (workspace.id is not None or re.search(r"git|ветк|репозитор|структур|список файлов", user_text, re.I)):
+            workspace.project_mcp.start()
+            for tool in workspace.project_mcp.list_tools().get("tools", []):
+                available_tools.append(tool)
+                tool_owners[tool["name"]] = "project"
         task_control_enabled = task_control.is_enabled()
         auto_route = str((tool_context or {}).get("auto_route") or "")
-        if mcp_enabled and weather_mcp.status().get("connected"):
-            for tool in weather_mcp.tools_for_model():
-                available_tools.append(tool)
-                tool_owners[tool["name"]] = "open-meteo"
-        if mcp_enabled and mediawiki_mcp.status().get("connected"):
-            for tool in mediawiki_mcp.tools_for_model():
-                if tool["name"] in MEDIAWIKI_MODEL_TOOLS:
-                    available_tools.append(tool)
-                    tool_owners[tool["name"]] = "mediawiki"
-        if mcp_enabled and worldbank_mcp.status().get("connected"):
-            for tool in worldbank_mcp.tools_for_model():
-                if tool["name"] in WORLDBANK_MODEL_TOOLS:
-                    available_tools.append(tool)
-                    tool_owners[tool["name"]] = "worldbank"
-        if mcp_enabled and scheduler_mcp.status().get("connected") and _scheduled_tool_allowlist.get() is None:
+        if server_allowed("scheduler") and scheduler_mcp.status().get("connected") and _scheduled_tool_allowlist.get() is None:
             for tool in scheduler_mcp.tools_for_model():
                 if tool["name"] in SCHEDULER_MODEL_TOOLS:
                     available_tools.append(tool)
                     tool_owners[tool["name"]] = "scheduler"
         allowlist = _scheduled_tool_allowlist.get()
         file_export_enabled = (
-            mcp_enabled
+            server_allowed("filesystem")
             and bool((tool_context or {}).get("enable_file_export"))
             and allowlist is None
         )
@@ -1009,7 +1029,7 @@ def create_app(
                 schema = deepcopy(safe_tool.get("input_schema") or {})
                 properties = schema.setdefault("properties", {})
                 properties.setdefault("path", {})["description"] = (
-                    "Базовое имя отчёта, например weather-novosibirsk.md. Каталог будет заменён на workspace/reports."
+                    "Базовое имя отчёта, например project-notes.md. Каталог будет заменён на workspace/reports."
                 )
                 properties.setdefault("content", {})["description"] = "Полное содержимое Markdown-отчёта."
                 schema["required"] = ["path", "content"]
@@ -1019,17 +1039,17 @@ def create_app(
         if allowlist is not None:
             available_tools = [tool for tool in available_tools if tool["name"] in allowlist]
         if auto_route and auto_route not in {"tools", "hybrid"}:
-            available_tools = []
+            available_tools = [tool for tool in available_tools if tool_owners.get(tool["name"]) == "project"
+                               or (workspace.id is not None and tool_owners.get(tool["name"]) == "scheduler")
+                               or (tool_owners.get(tool["name"]) == "filesystem" and file_export_enabled)]
 
         def execute_owned_tool(name: str, arguments: dict[str, Any], owner: str | None) -> dict[str, Any]:
             if not mcp_control.is_enabled():
                 raise PermissionError("Все MCP принудительно отключены пользователем.")
-            if owner == "open-meteo":
-                return weather_mcp.call_tool(name, arguments)
-            if owner == "mediawiki":
-                return mediawiki_mcp.call_tool(name, arguments)
-            if owner == "worldbank":
-                return worldbank_mcp.call_tool(name, arguments)
+            if not server_allowed(owner):
+                raise PermissionError(f"MCP-сервер {owner} отключён пользователем.")
+            if owner == "project":
+                return workspace.project_mcp.call_tool(name, arguments)
             if owner == "filesystem":
                 if name != "write_file" or not file_export_enabled:
                     raise PermissionError("Запись файлов не разрешена для этого запроса.")
@@ -1130,7 +1150,7 @@ def create_app(
                 task_memory=task_memory_snapshot,
                 task_handoff_context=handoff_context if task_control_enabled else {},
                 task_state=task_state if task_control_enabled else {},
-                policy_guidance=(generation_guidance(task_state, invariants) if task_control_enabled else "") + rag_context + (
+                policy_guidance=workspace.context() + (generation_guidance(task_state, invariants) if task_control_enabled else "") + rag_context + (
                     "\n\nКОМПОЗИЦИЯ ОТЧЁТА:\n"
                     "Пользователь явно попросил сохранить результат. Сначала получи необходимые исходные данные "
                     "через доступные MCP-инструменты, затем самостоятельно проанализируй их строго по запросу "
@@ -1552,16 +1572,37 @@ def create_app(
             "profiles": storage.list_profiles(),
             "active_profile_id": profile_id,
             "presets": preset_manager.list(),
+            "active_workspace_project_id": workspaces.active(profile_id),
+            "self_workspace_root": str(BASE_DIR),
         })
+
+    @flask_app.post("/api/workspace/select")
+    def select_workspace():
+        try:
+            project_id = json_body().get("project_id") or None
+            workspace = workspaces.select(project_id, current_profile_id())
+            return jsonify({"ok": True, "project_id": project_id, "name": workspace.name, "root": str(workspace.root)})
+        except (FileNotFoundError, PermissionError):
+            return api_error("Проект не найден.", 404)
+        except ValueError as error:
+            return api_error(str(error), 400)
 
     @flask_app.get("/api/rag/state")
     def rag_state():
-        return jsonify({"ok": True, **rag_index.state()})
+        workspace = current_workspace()
+        return jsonify({"ok": True, **current_rag_index().state(), "project": {
+            **workspace.docs.state(), "id": workspace.id, "name": workspace.name, "kind": workspace.kind}})
 
     @flask_app.post("/api/rag/index")
     def rag_build_index():
         try:
-            return jsonify({"ok": True, "job": rag_index.start_build(json_body())}), 202
+            workspace = current_workspace()
+            with workspace.docs.lock:
+                if data_dir is None or workspace.id is not None:
+                    if current_rag_index().state()["job"].get("running"):
+                        raise RuntimeError("Индексация уже выполняется.")
+                    workspace.docs.sync()
+                return jsonify({"ok": True, "job": current_rag_index().start_build(json_body())}), 202
         except RuntimeError as error:
             return api_error(str(error), 409)
         except ValueError as error:
@@ -1574,7 +1615,7 @@ def create_app(
             page = int(request.args.get("page", 1))
             page_size = int(request.args.get("page_size", 20))
             source = str(request.args.get("source", ""))
-            return jsonify({"ok": True, **rag_index.list_chunks(strategy, page, page_size, source)})
+            return jsonify({"ok": True, **current_rag_index().list_chunks(strategy, page, page_size, source)})
         except (TypeError, ValueError) as error:
             return api_error(str(error), 400)
 
@@ -1582,7 +1623,7 @@ def create_app(
     def rag_search():
         try:
             data = json_body()
-            return jsonify({"ok": True, **rag_index.search(data.get("query", ""), data.get("top_k", 5))})
+            return jsonify({"ok": True, **current_rag_index().search(data.get("query", ""), data.get("top_k", 5))})
         except ValueError as error:
             return api_error(str(error), 400)
         except RuntimeError as error:
@@ -1593,7 +1634,7 @@ def create_app(
         return jsonify({
             "ok": True,
             "questions": list(known_rag_questions().values()),
-            "items": rag_evaluations.list(),
+            "items": current_evaluation_store().list(),
         })
 
     @flask_app.post("/api/conversations/<conversation_id>/rag-compare")
@@ -1609,7 +1650,7 @@ def create_app(
                 "strategy": data.get("strategy", "structural"),
                 "top_k": data.get("top_k", 5),
             })
-            retrieval = rag_index.retrieve(question, options["strategy"], options["top_k"])
+            retrieval = current_rag_index().retrieve(question, options["strategy"], options["top_k"])
             history, summary, facts, context_snapshot = request_history(conversation)
             profile_id = current_profile_id()
             memory_snapshot = memory_manager.context_snapshot(conversation, context_snapshot["mode"], profile_id)
@@ -1636,7 +1677,7 @@ def create_app(
                 policy_guidance=guidance + build_rag_context(retrieval),
             )
             control = known_rag_questions().get(str(data.get("question_id") or ""))
-            item = rag_evaluations.add({
+            item = current_evaluation_store().add({
                 "conversation_id": conversation_id,
                 "question_id": (control or {}).get("id"),
                 "question": question,
@@ -1724,7 +1765,7 @@ def create_app(
                     },
                 }
             control = known_rag_questions().get(str(data.get("question_id") or ""))
-            item = rag_evaluations.add({
+            item = current_evaluation_store().add({
                 "evaluation_mode": "day23-pipeline",
                 "conversation_id": conversation_id,
                 "question_id": (control or {}).get("id"),
@@ -1826,7 +1867,7 @@ def create_app(
                     "notes": f"Не удалось разобрать LLM-оценку: {error}",
                 }
             semantic["technical"] = deepcopy(judge_result.technical)
-            item = rag_evaluations.add({
+            item = current_evaluation_store().add({
                 "evaluation_mode": "day24-evidence",
                 "conversation_id": conversation_id,
                 "question_id": (control or {}).get("id"),
@@ -1920,9 +1961,63 @@ def create_app(
         except RuntimeError as error:
             return api_error(str(error), 503)
 
+    def managed_server(name):
+        if name not in MCPServerControl.SERVERS:
+            abort(404)
+        workspace = current_workspace()
+        return {"project": workspace.project_mcp, "filesystem": workspace.filesystem,
+                "scheduler": scheduler_mcp}[name]
+
+    def managed_servers_state():
+        workspace = current_workspace()
+        permissions = mcp_server_control.state()
+        return {"ok": True, "global_enabled": mcp_control.is_enabled(),
+                "workspace": {"id": workspace.id, "name": workspace.name, "root": str(workspace.root)},
+                "executor": scheduler.status(),
+                "servers": [{"id": name, "enabled": permissions[name], "allowed": server_allowed(name),
+                    "scope": str(scheduler_repository.database_path) if name == "scheduler" else
+                        str(workspace.root if name == "project" else managed_server(name).status().get("workspace") or workspace.root),
+                    "status": managed_server(name).status()} for name in MCPServerControl.SERVERS]}
+
+    @flask_app.get("/api/mcp/servers")
+    def mcp_servers_status():
+        return jsonify(managed_servers_state())
+
+    @flask_app.post("/api/mcp/servers/<name>/<action>")
+    def mcp_server_action(name, action):
+        manager = managed_server(name)
+        if action not in {"enable", "disable", "start", "stop", "tools"}:
+            abort(404)
+        errors = {}
+        tools = None
+        if action == "enable":
+            mcp_server_control.set_enabled(name, True)
+        elif action == "disable":
+            mcp_server_control.set_enabled(name, False)
+            targets = {"scheduler": scheduler_mcp} if name == "scheduler" else {
+                key: value for key, value in workspaces.managers().items() if key.startswith(name + ":")}
+            for key, target in targets.items():
+                try:
+                    target.stop()
+                except RuntimeError as error:
+                    errors[key] = str(error)
+        else:
+            if action != "stop" and not server_allowed(name):
+                return jsonify({"ok": False, "error": "MCP-сервер запрещён. Проверьте общий и отдельный переключатели."}), 403
+            try:
+                if action == "start":
+                    manager.start()
+                elif action == "stop":
+                    manager.stop()
+                else:
+                    tools = manager.list_tools().get("tools", [])
+            except RuntimeError as error:
+                return jsonify({"ok": False, "error": str(error), "mcp": manager.status()}), 503
+        return jsonify({**managed_servers_state(), "tools": tools, "errors": errors})
+
     @flask_app.get("/api/mcp/status")
     def mcp_status():
-        return jsonify({"ok": True, "mcp": mcp.status()})
+        return jsonify({"ok": True, "mcp": current_workspace().filesystem.status()})
 
     @flask_app.get("/api/task-control")
     def task_control_status():
@@ -1948,11 +2043,8 @@ def create_app(
     def mcp_control_disable():
         control = mcp_control.set_enabled(False)
         managers = {
-            "filesystem": mcp,
-            "open-meteo": weather_mcp,
+            **workspaces.managers(),
             "scheduler": scheduler_mcp,
-            "mediawiki": mediawiki_mcp,
-            "worldbank": worldbank_mcp,
         }
         stopped: dict[str, dict[str, Any]] = {}
         errors: dict[str, str] = {}
@@ -1978,96 +2070,38 @@ def create_app(
 
     @flask_app.post("/api/mcp/start")
     def mcp_start():
-        if not mcp_control.is_enabled():
-            return mcp_blocked_response()
+        if not server_allowed("filesystem"):
+            return mcp_blocked_response("filesystem")
         try:
-            return jsonify({"ok": True, "mcp": mcp.start()})
+            return jsonify({"ok": True, "mcp": current_workspace().filesystem.start()})
         except RuntimeError as error:
             logger.warning("MCP не запущен | reason=%s", error)
-            return jsonify({"ok": False, "error": str(error), "mcp": mcp.status()}), 503
+            return jsonify({"ok": False, "error": str(error), "mcp": current_workspace().filesystem.status()}), 503
 
     @flask_app.get("/api/mcp/tools")
     def mcp_tools():
-        if not mcp_control.is_enabled():
-            return mcp_blocked_response()
+        if not server_allowed("filesystem"):
+            return mcp_blocked_response("filesystem")
         try:
-            return jsonify({"ok": True, "mcp": mcp.list_tools()})
+            return jsonify({"ok": True, "mcp": current_workspace().filesystem.list_tools()})
         except RuntimeError as error:
             logger.warning("Не удалось получить MCP-инструменты | reason=%s", error)
-            return jsonify({"ok": False, "error": str(error), "mcp": mcp.status()}), 409
+            return jsonify({"ok": False, "error": str(error), "mcp": current_workspace().filesystem.status()}), 409
 
     @flask_app.post("/api/mcp/stop")
     def mcp_stop():
         try:
-            return jsonify({"ok": True, "mcp": mcp.stop()})
+            return jsonify({"ok": True, "mcp": current_workspace().filesystem.stop()})
         except RuntimeError as error:
             logger.warning("MCP не остановлен штатно | reason=%s", error)
-            return jsonify({"ok": False, "error": str(error), "mcp": mcp.status()}), 503
+            return jsonify({"ok": False, "error": str(error), "mcp": current_workspace().filesystem.status()}), 503
 
-    @flask_app.get("/api/weather-mcp/status")
-    def weather_mcp_status():
-        return jsonify({"ok": True, "mcp": weather_mcp.status()})
 
-    @flask_app.post("/api/weather-mcp/start")
-    def weather_mcp_start():
-        if not mcp_control.is_enabled():
-            return mcp_blocked_response()
-        try:
-            status = weather_mcp.start()
-            tools = weather_mcp.list_tools()
-            return jsonify({"ok": True, "mcp": {**status, **tools}})
-        except RuntimeError as error:
-            logger.warning("Open-Meteo MCP не запущен: %s", error)
-            return jsonify({"ok": False, "error": str(error), "mcp": weather_mcp.status()}), 503
 
-    @flask_app.get("/api/weather-mcp/tools")
-    def weather_mcp_tools():
-        if not mcp_control.is_enabled():
-            return mcp_blocked_response()
-        try:
-            return jsonify({"ok": True, "mcp": weather_mcp.list_tools()})
-        except RuntimeError as error:
-            return jsonify({"ok": False, "error": str(error), "mcp": weather_mcp.status()}), 409
 
-    @flask_app.post("/api/weather-mcp/stop")
-    def weather_mcp_stop():
-        try:
-            return jsonify({"ok": True, "mcp": weather_mcp.stop()})
-        except RuntimeError as error:
-            return jsonify({"ok": False, "error": str(error), "mcp": weather_mcp.status()}), 503
 
-    orchestration_managers = {
-        "mediawiki": mediawiki_mcp,
-        "worldbank": worldbank_mcp,
-    }
 
-    @flask_app.get("/api/orchestration-mcp/<server_name>/status")
-    def orchestration_mcp_status(server_name: str):
-        manager = orchestration_managers.get(server_name)
-        if manager is None:
-            return api_error("Неизвестный MCP-сервер.", 404)
-        return jsonify({"ok": True, "mcp": manager.status()})
 
-    @flask_app.route("/api/orchestration-mcp/<server_name>/<action>", methods=["GET", "POST"])
-    def orchestration_mcp_action(server_name: str, action: str):
-        manager = orchestration_managers.get(server_name)
-        if manager is None or action not in {"start", "tools", "stop"}:
-            return api_error("Неизвестная операция MCP.", 404)
-        try:
-            if action == "start":
-                if not mcp_control.is_enabled():
-                    return mcp_blocked_response()
-                status = manager.start()
-                tools = manager.list_tools()
-                return jsonify({"ok": True, "mcp": {**status, **tools}})
-            if action == "tools":
-                if not mcp_control.is_enabled():
-                    return mcp_blocked_response()
-                return jsonify({"ok": True, "mcp": manager.list_tools()})
-            return jsonify({"ok": True, "mcp": manager.stop()})
-        except RuntimeError as error:
-            status_code = 409 if action == "tools" else 503
-            return jsonify({"ok": False, "error": str(error), "mcp": manager.status()}), status_code
 
     @flask_app.get("/api/mcp/activity/<activity_id>")
     def mcp_activity(activity_id: str):
@@ -2105,8 +2139,8 @@ def create_app(
 
     @flask_app.get("/api/scheduler/tools")
     def scheduler_tools():
-        if not mcp_control.is_enabled():
-            return mcp_blocked_response()
+        if not server_allowed("scheduler"):
+            return mcp_blocked_response("scheduler")
         try:
             return jsonify({"ok": True, "mcp": scheduler_mcp.list_tools()})
         except RuntimeError as error:
@@ -2115,7 +2149,7 @@ def create_app(
     @flask_app.post("/api/scheduler/tasks")
     def create_scheduled_task_api():
         data = json_body()
-        project_id = str(data.get("project_id") or "") or None
+        project_id = str(data.get("project_id", workspaces.active(current_profile_id())) or "") or None
         try:
             if project_id:
                 accessible_project(project_id)
@@ -2221,7 +2255,7 @@ def create_app(
     def create_conversation():
         try:
             data = json_body()
-            project_id = data.get("project_id")
+            project_id = data.get("project_id", workspaces.active(current_profile_id()))
             if project_id:
                 accessible_project(str(project_id))
             conversation = storage.create_conversation(
@@ -2355,13 +2389,28 @@ def create_app(
     def create_project():
         try:
             data = json_body()
-            project = memory_manager.create_project(data.get("name"), data.get("description", ""), current_profile_id())
+            source = data.get("workspace")
+            if source is not None and not isinstance(source, dict):
+                raise ValueError("Параметры рабочей папки должны быть объектом.")
+            name = str(data.get("name") or (str(source.get("source", "")).rstrip("/\\").split("/")[-1] if source else "")).strip()
+            if not name or len(name) > 120 or len(str(data.get("description") or "")) > 2000:
+                raise ValueError("Проверьте название (1–120 символов) и описание проекта (до 2000).")
+            prepared = workspaces.prepare(str(source.get("kind")), str(source.get("source") or "")) if source else None
+            project = memory_manager.create_project(name, data.get("description", ""), current_profile_id())
+            if prepared:
+                project["workspace"] = prepared
+                project = storage.save_project(project)
+                workspace = workspaces.select(project["id"], current_profile_id())
+                workspace.docs.sync()
+                workspace.rag.start_build({})
             payload: dict[str, Any] = {"ok": True, "project": project}
             if data.get("create_dialog") is True:
                 payload["conversation"] = with_token_totals(storage.create_conversation("Новый диалог", project["id"], current_profile_id()))
             return jsonify(payload), 201
         except ValueError as error:
             return api_error(str(error), 400)
+        except (RuntimeError, OSError) as error:
+            return api_error(str(error), 503)
 
     @flask_app.get("/api/projects/<project_id>")
     def get_project(project_id: str):
@@ -2389,6 +2438,10 @@ def create_app(
             project_id = json_body().get("project_id")
             if project_id is not None:
                 accessible_project(str(project_id))
+            source_workspace = workspaces.get(conversation.get("project_id"), current_profile_id())
+            target_workspace = workspaces.get(project_id, current_profile_id())
+            if conversation.get("messages") and source_workspace.id != target_workspace.id:
+                return api_error("Для другого рабочего проекта создайте новый диалог: история и память должны оставаться раздельными.", 409)
             conversation["project_id"] = project_id
             conversation = storage.save_conversation(conversation)
             return jsonify({"ok": True, "conversation": with_token_totals(conversation)})
@@ -2401,6 +2454,8 @@ def create_app(
             source = accessible_conversation(conversation_id)
             project_id = str(json_body().get("project_id", ""))
             accessible_project(project_id)
+            if source.get("messages") and workspaces.get(source.get("project_id"), current_profile_id()).id != workspaces.get(project_id, current_profile_id()).id:
+                return api_error("Историю другого рабочего проекта нельзя копировать в новый контекст. Создайте пустой диалог.", 409)
             copied = storage.copy_conversation_to_project(conversation_id, project_id)
             copy_artifact_files(storage.data_dir, source, copied)
             copied = storage.save_conversation(copied)
@@ -2648,6 +2703,95 @@ def create_app(
         except (ValueError, FileNotFoundError, PermissionError):
             return api_error("Диалог не найден.", 404)
 
+    def send_developer_help(conversation, content, question, settings, source, activity_id):
+        """Явный read-only маршрут: RAG + два настоящих MCP-вызова, без автомата задач."""
+        workspace = current_workspace()
+        project_mcp = workspace.project_mcp
+        def execute_project_tool(name, arguments):
+            call_id = begin_tool_activity(activity_id, "project", name, arguments)
+            try:
+                if not server_allowed("project"):
+                    raise PermissionError("Project MCP отключён пользователем.")
+                output = project_mcp.call_tool(name, arguments)
+                finish_tool_activity(activity_id, call_id, is_error=bool(output.get("is_error")))
+                return output
+            except Exception as error:
+                finish_tool_activity(activity_id, call_id, is_error=True, error=str(error))
+                raise
+
+        ensure_context_management(conversation)
+        exchange_id = uuid.uuid4().hex
+        user = {
+            "id": uuid.uuid4().hex, "exchange_id": exchange_id, "role": "user",
+            "content": content, "created_at": now_iso(), "author_profile_id": current_profile_id(),
+            "technical": {"request_status": "pending", "settings": settings.to_dict(),
+                          "configuration_source": source, "developer_help": True},
+        }
+        append_tree_message(conversation, user)
+        if conversation.get("title") == "Новый диалог":
+            conversation["title"] = content.replace("\n", " ")[:60]
+        conversation = storage.save_conversation(conversation)
+        try:
+            if not question:
+                result = AgentResult(content=HELP_TEXT, reasoning_content="", technical={"request_status": "local"})
+            else:
+                guidance, retrieval, audit = project_context(
+                    question, workspace.rag, project_mcp, server_allowed("project"), execute_project_tool,
+                    allow_missing_index=workspace.id is not None,
+                )
+                guidance = workspace.context() + guidance
+                history, summary, facts, context = request_history(conversation, stage_scoped=False)
+                documentation = workspace.docs.state()
+                if documentation["stale"]:
+                    guidance += "\nДокументация изменена после копирования в RAG. Предупреди об устаревшем индексе."
+                result = chat_agent.reply(
+                    sanitize_history_for_generation(history), question, settings,
+                    summary=summary, facts=facts,
+                    memory_context=memory_manager.context_snapshot(conversation, context["mode"], current_profile_id()),
+                    policy_guidance=guidance,
+                )
+                answer = result.content + source_appendix(retrieval, audit)
+                if retrieval.get("unavailable"):
+                    answer += "\n\n" + retrieval["unavailable"]
+                if documentation["stale"]:
+                    answer += "\n\nДокументация изменена: обновите индекс в «Управлении RAG»."
+                result = AgentResult(content=answer, reasoning_content=result.reasoning_content, technical=result.technical)
+                result.technical.update({
+                    "mcp_tool_calls": audit,
+                    "rag": {"enabled": True, "strategy": "structural", "mode": "baseline",
+                            "run_id": retrieval.get("run_id"),
+                            "top_k": len(retrieval.get("chunks", [])),
+                            "candidate_k": retrieval.get("candidate_count", len(retrieval.get("chunks", []))),
+                            "final_k": len(retrieval.get("chunks", [])),
+                            "supplemental_queries": retrieval.get("supplemental_queries", []),
+                            "chunks": [compact_rag_chunk(item) for item in retrieval.get("chunks", [])]},
+                    "context_management": context, "project_documentation": documentation,
+                })
+            result.technical.update({"developer_help": True, "settings": settings.to_dict(),
+                                     "configuration_source": source, "workspace": {"project_id": workspace.id, "root": str(workspace.root), "name": workspace.name}})
+            result.technical.setdefault("request_status", "completed")
+            result.technical["usage"] = normalize_token_usage(result.technical.get("usage"))
+            for message in conversation["messages"]:
+                if message["id"] == user["id"]:
+                    message["technical"]["request_status"] = result.technical["request_status"]
+            append_tree_message(conversation, {
+                "id": uuid.uuid4().hex, "exchange_id": exchange_id, "role": "assistant",
+                "content": result.content, "reasoning_content": result.reasoning_content,
+                "created_at": now_iso(), "technical": result.technical,
+            }, parent_id=user["id"])
+            conversation = storage.save_conversation(conversation)
+            set_mcp_activity_phase(activity_id, "completed")
+            return jsonify({"ok": True, "conversation": with_token_totals(conversation)})
+        except Exception as error:
+            message = friendly_api_error(error)
+            for item in conversation["messages"]:
+                if item["id"] == user["id"]:
+                    item["technical"].update({"request_status": "failed", "error": message})
+            conversation = storage.save_conversation(conversation)
+            set_mcp_activity_phase(activity_id, "error", message)
+            logger.exception("Ошибка /help | conversation_id=%s", conversation["id"])
+            return jsonify({"ok": False, "error": message, "conversation": with_token_totals(conversation)}), 502
+
     @flask_app.post("/api/conversations/<conversation_id>/messages")
     def send_message(conversation_id: str):
         try:
@@ -2657,6 +2801,8 @@ def create_app(
             rag_options = normalize_rag_options(data.get("rag"))
             source = configuration_source(data.get("preset_id"), settings, preset_manager)
             conversation = accessible_conversation(conversation_id)
+            if current_workspace().id is not None:
+                rag_options = normalize_rag_options({"enabled": bool(current_rag_index().store.latest_run()), "mode": "baseline", "routing_mode": "strict"})
             automatic = data.get("automatic") is True
             task_control_enabled = task_control.is_enabled()
             state = ensure_task_state(conversation)
@@ -2681,6 +2827,10 @@ def create_app(
             return api_error(str(error), 409)
         except (ValueError, KeyError) as error:
             return api_error(str(error).strip("'"), 400)
+
+        help_question = parse_help(content) if not automatic else None
+        if help_question is not None:
+            return send_developer_help(conversation, content, help_question, settings, source, mcp_activity_id)
 
         exchange_id = uuid.uuid4().hex
         created_at = now_iso()
@@ -2753,7 +2903,7 @@ def create_app(
                 "classifier": "manual",
             }
             if auto_routing:
-                probe = rag_index.retrieve(
+                probe = current_rag_index().retrieve(
                     retrieval_question, rag_options["strategy"], rag_options["final_k"],
                 )
                 probe["route_probe_only"] = True
@@ -2827,7 +2977,7 @@ def create_app(
                 if document_route and is_synthesis_question(content):
                     ledger_ids = evidence_ledger_ids(conversation)
                     if ledger_ids:
-                        retrieval = rag_index.augment_with_chunk_ids(
+                        retrieval = current_rag_index().augment_with_chunk_ids(
                             content, retrieval or {}, ledger_ids,
                             final_k=rag_options["final_k"],
                         )
@@ -2970,6 +3120,8 @@ def create_app(
                         technical={**result.technical, "outside_local_rag": True},
                     )
             result.technical["automatic_routing"] = deepcopy(route_info)
+            result.technical["workspace"] = {"project_id": current_workspace().id,
+                                             "root": str(current_workspace().root), "name": current_workspace().name}
             if strict_evidence:
                 result_evidence = deepcopy(result.technical.get("evidence") or {})
                 request_rag_snapshot["evidence"] = result_evidence
@@ -3389,9 +3541,6 @@ def create_app(
             return api_error("Пресет не найден.", 404)
 
     def run_scheduled_automation(task: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
-        if mcp_control.is_enabled() and "open-meteo" in task.get("mcp_servers", []):
-            weather_mcp.start()
-            weather_mcp.list_tools()
         profile_token = _profile_override.set(str(task["owner_profile_id"]))
         automation_token = _automation_run_override.set({
             "task_id": task["id"], "run_id": run["id"],
@@ -3421,14 +3570,10 @@ def create_app(
 
     scheduler.set_runner(run_scheduled_automation)
     if scheduler_autostart:
-        if mcp_control.is_enabled():
+        if server_allowed("scheduler"):
             scheduler_mcp.start()
             scheduler_mcp.list_tools()
         scheduler.start()
-    if orchestration_autostart and mcp_control.is_enabled():
-        for manager in (mediawiki_mcp, worldbank_mcp):
-            manager.start()
-            manager.list_tools()
 
     return flask_app
 
@@ -3555,14 +3700,10 @@ app = create_app(voice_service=WhisperService(BASE_DIR, autostart=False), schedu
 
 if __name__ == "__main__":
     app.extensions["whisper_service"].start()
-    if app.extensions["mcp_control"].is_enabled():
+    if app.extensions["mcp_control"].is_enabled() and app.extensions["mcp_server_control"].is_enabled("scheduler"):
         app.extensions["scheduler_mcp_manager"].start()
         app.extensions["scheduler_mcp_manager"].list_tools()
     app.extensions["scheduler_service"].start()
-    if app.extensions["mcp_control"].is_enabled():
-        for extension_name in ("mediawiki_mcp_manager", "worldbank_mcp_manager"):
-            app.extensions[extension_name].start()
-            app.extensions[extension_name].list_tools()
     logger.info("Приложение запущено напрямую через app.py | url=http://127.0.0.1:5000")
     print(f"Общий журнал: {_direct_log_paths['app']}")
     print(f"Журнал ошибок: {_direct_log_paths['errors']}")
@@ -3571,9 +3712,8 @@ if __name__ == "__main__":
     finally:
         app.extensions["scheduler_service"].stop()
         app.extensions["scheduler_mcp_manager"].stop()
-        app.extensions["weather_mcp_manager"].stop()
-        app.extensions["mediawiki_mcp_manager"].stop()
-        app.extensions["worldbank_mcp_manager"].stop()
         app.extensions["mcp_manager"].stop()
+        app.extensions["project_mcp_manager"].stop()
+        app.extensions["workspace_service"].stop()
         app.extensions["whisper_service"].stop()
         logger.info("Приложение остановлено")

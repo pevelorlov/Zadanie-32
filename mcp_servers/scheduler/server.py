@@ -37,7 +37,7 @@ def create_scheduled_task(
     mcp_servers: list[str] | None = None,
     allowed_tools: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Создать задание. schedule_type: once или interval. Для once передай run_at в ISO-виде либо delay_minutes. Для interval передай interval_minutes не меньше 5 и при желании run_at/delay_minutes для первого запуска. Для погоды укажи mcp_servers=['open-meteo'] и нужные инструменты: find_location, get_current_weather, get_hourly_forecast, get_daily_forecast, get_precipitation_window. Сохрани в prompt самодостаточное будущее поручение, а не описание расписания."""
+    """Создать задание. schedule_type: once или interval. Для once передай run_at в ISO-виде либо delay_minutes. Для interval передай interval_minutes не меньше 5 и при желании run_at/delay_minutes для первого запуска. Сохрани в prompt самодостаточное будущее поручение, а не описание расписания."""
     return repository.create_task(
         title=title,
         prompt=prompt,

@@ -23,12 +23,12 @@ class SchedulerToolProvider(FakeProvider):
     def complete_with_tools(self, messages, settings, tools, tool_executor, max_rounds=6):
         self.asserted_tool_names = {tool["name"] for tool in tools}
         self.tool_output = tool_executor("create_scheduled_task", {
-            "title": "Погода через час",
-            "prompt": "Узнай погоду в Новосибирске и предложи одежду.",
+            "title": "Сводка через час",
+            "prompt": "Подготовь сводку по проекту.",
             "schedule_type": "once",
             "delay_minutes": 60,
-            "mcp_servers": ["open-meteo"],
-            "allowed_tools": ["find_location", "get_current_weather"],
+            "mcp_servers": [],
+            "allowed_tools": [],
         })
         return AgentResult(
             content="Задание создано на час вперёд.", reasoning_content="",
@@ -70,13 +70,13 @@ class SchedulerRepositoryTests(unittest.TestCase):
 
     def test_once_interval_history_and_aggregate_are_persisted(self):
         once = self.repository.create_task(
-            title="Через час", prompt="Проверь погоду", schedule_type="once", delay_minutes=60,
-            mcp_servers=["open-meteo"], allowed_tools=["get_current_weather"],
+            title="Через час", prompt="Подготовь сводку", schedule_type="once", delay_minutes=60,
+            mcp_servers=[], allowed_tools=[],
         )
         interval = self.repository.create_task(
             title="Каждый час", prompt="Сделай сводку", schedule_type="interval", interval_minutes=60,
         )
-        self.assertEqual(once["mcp_servers"], ["open-meteo"])
+        self.assertEqual(once["mcp_servers"], [])
         self.assertEqual(interval["interval_minutes"], 60)
         restored = SchedulerRepository(self.repository.database_path)
         self.assertEqual(len(restored.list_tasks()), 2)
@@ -110,7 +110,7 @@ class SchedulerRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "не принадлежат"):
             self.repository.create_task(
                 title="Чужой tool", prompt="Запрос", schedule_type="once", delay_minutes=5,
-                mcp_servers=["open-meteo"], allowed_tools=["delete_everything"],
+                mcp_servers=[], allowed_tools=["delete_everything"],
             )
 
 
@@ -193,7 +193,7 @@ class SchedulerApiTests(unittest.TestCase):
         manager.list_tools()
         conversation = self.client.post("/api/conversations", json={"title": "Команды"}).get_json()["conversation"]
         response = self.client.post(f"/api/conversations/{conversation['id']}/messages", json={
-            "content": "Через час узнай погоду и посоветуй одежду.",
+            "content": "Через час подготовь сводку по проекту.",
             "settings": {},
         })
         self.assertEqual(response.status_code, 200)
@@ -201,8 +201,8 @@ class SchedulerApiTests(unittest.TestCase):
         self.assertFalse(provider.tool_output["is_error"])
         task = provider.tool_output["result"]
         self.assertTrue(task["conversation_id"])
-        self.assertEqual(task["mcp_servers"], ["open-meteo"])
-        self.assertEqual(task["allowed_tools"], ["find_location", "get_current_weather"])
+        self.assertEqual(task["mcp_servers"], [])
+        self.assertEqual(task["allowed_tools"], [])
         self.assertEqual(len(self.repository.list_tasks()), 1)
 
     def test_blocked_chat_answer_rolls_back_created_schedule_and_dialog(self):
