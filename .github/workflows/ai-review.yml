@@ -26,6 +26,7 @@ jobs:
     permissions:
       contents: read
       issues: write
+      pull-requests: write
     defaults:
       run:
         shell: pwsh
@@ -94,7 +95,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: deepseek-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          name: deepseek-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
           path: reports/day32/
           if-no-files-found: ignore
           retention-days: 14
