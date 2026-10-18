@@ -170,3 +170,13 @@ body.rag-mode .chat-panel,body.rag-mode .context-panel{display:none}body.rag-mod
 .markdown-body table { border-collapse:collapse; width:max-content; min-width:100%; }
 .markdown-body th, .markdown-body td { border:1px solid var(--line); padding:7px 10px; text-align:left; vertical-align:top; }
 .markdown-body th { background:#11251d; }
+/* Результаты реального GitHub Actions в сообщении чата. */
+.review-panel { margin: 12px 0; padding: 14px 16px; border: 1px solid var(--line, #31574a); border-radius: 12px; background: var(--panel, #0b1714); overflow-wrap: anywhere; }
+.review-panel a { color: var(--green, #61e6b3); }
+.review-panel p { margin: 7px 0; }
+.review-status { font-weight: 600; }
+.review-head { font-size: 12px; opacity: .75; }
+.review-panel details { margin-top: 9px; }
+.review-panel summary { cursor: pointer; font-weight: 600; }
+.review-panel pre { max-height: 380px; overflow: auto; white-space: pre; font-size: 12px; padding: 10px; border-radius: 6px; background: rgba(100, 140, 180, .08); }
+.review-steps { padding-left: 22px; font-size: 12px; }

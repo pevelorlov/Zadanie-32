@@ -83,6 +83,7 @@ from document_index import (
 )
 from document_index.evaluations import RagEvaluationStore
 from developer_help import HELP_TEXT, ProjectDocumentation, parse_help, project_context, source_appendix
+from chat_review import ChatReviewService, ReviewError, review_intent
 from workspaces import WorkspaceService
 from mcp_control import PersistentFeatureControl, MCPServerControl
 from mcp_manager import (
@@ -380,6 +381,7 @@ def create_app(
     scheduler_service: SchedulerService | None = None,
     scheduler_autostart: bool = False,
     rag_index_service: RagIndexService | None = None,
+    review_service: ChatReviewService | None = None,
 ) -> Flask:
     flask_app = Flask(__name__)
     flask_app.json.ensure_ascii = False
@@ -406,6 +408,7 @@ def create_app(
     workspace_evaluations = {None: rag_evaluations}
     project_docs = ProjectDocumentation(BASE_DIR, getattr(rag_index, "documents_dir", storage.data_dir / "rag_documents"))
     workspaces = WorkspaceService(storage, BASE_DIR, rag_index, project_docs, project_mcp, mcp)
+    github_reviews = review_service or ChatReviewService()
     mcp_control = PersistentFeatureControl(storage.data_dir / "mcp_control.json")
     mcp_server_control = MCPServerControl(storage.data_dir / "mcp_server_control.json")
 
@@ -425,6 +428,7 @@ def create_app(
     flask_app.extensions["project_mcp_manager"] = project_mcp
     flask_app.extensions["project_documentation"] = project_docs
     flask_app.extensions["workspace_service"] = workspaces
+    flask_app.extensions["chat_review_service"] = github_reviews
     flask_app.extensions["scheduler_mcp_manager"] = scheduler_mcp
     flask_app.extensions["scheduler_service"] = scheduler
     flask_app.extensions["rag_index_service"] = rag_index
@@ -903,6 +907,7 @@ def create_app(
                 mcp_activities.pop(oldest, None)
             mcp_activities[activity_id] = {
                 "id": activity_id, "phase": "thinking", "created_at": now_iso(), "calls": [],
+                "owner_profile_id": current_profile_id(),
             }
         return activity_id
 
@@ -2109,7 +2114,7 @@ def create_app(
             return api_error("Некорректный идентификатор выполнения.", 400)
         with mcp_activity_lock:
             activity = deepcopy(mcp_activities.get(activity_id))
-        if activity is None:
+        if activity is None or activity.get("owner_profile_id") != current_profile_id():
             return api_error("Выполнение ещё не зарегистрировано.", 404)
         return jsonify({"ok": True, "activity": activity})
 
@@ -2792,6 +2797,68 @@ def create_app(
             logger.exception("Ошибка /help | conversation_id=%s", conversation["id"])
             return jsonify({"ok": False, "error": message, "conversation": with_token_totals(conversation)}), 502
 
+    def send_github_review(conversation, content, target, settings, source, activity_id):
+        """Явное поручение: разрешён только повторный запуск существующего PR workflow."""
+        profile_id = current_profile_id()
+        workspace = current_workspace()
+        if conversation.get("project_id"):
+            accessible_project(str(conversation["project_id"]), owner_only=True)
+        elif conversation.get("owner_profile_id") != profile_id:
+            raise PermissionError("Запуск ревью доступен владельцу диалога/проекта.")
+        previous = next((m.get("technical", {}).get("github_review")
+                         for m in reversed(active_path_messages(conversation))
+                         if m.get("role") == "assistant" and m.get("technical", {}).get("request_status") == "completed"
+                         and m.get("technical", {}).get("github_review")), None)
+        exchange_id = uuid.uuid4().hex
+        user = {"id": uuid.uuid4().hex, "exchange_id": exchange_id, "role": "user",
+                "content": content, "created_at": now_iso(), "author_profile_id": profile_id,
+                "technical": {"request_status": "pending", "settings": settings.to_dict(),
+                              "configuration_source": source, "review_request": True}}
+        append_tree_message(conversation, user)
+        if conversation.get("title") == "Новый диалог":
+            conversation["title"] = content.replace("\n", " ")[:60]
+        storage.save_conversation(conversation)
+        state = {}
+        def progress(value):
+            nonlocal state
+            state = deepcopy(value)
+            with mcp_activity_lock:
+                if activity_id in mcp_activities:
+                    mcp_activities[activity_id]["review"] = state
+        try:
+            result = github_reviews.run(workspace.root, target, previous=previous, progress=progress)
+            state = deepcopy(result["state"])
+            technical = deepcopy(result["technical"])
+            technical.update(request_status="completed", github_review=state,
+                             chat_settings=settings.to_dict(), configuration_source=source,
+                             workspace={"project_id": workspace.id, "root": str(workspace.root), "name": workspace.name})
+            technical["usage"] = normalize_token_usage(technical.get("usage"))
+            visible_report = result["report"].replace("<!-- deepseek-agent-review -->", "", 1).lstrip()
+            answer = (visible_report + f"\n\n[Запуск GitHub Actions]({state['run_url']}) · "
+                      f"[Комментарий в PR]({state['comment_url']})\n\n"
+                      "Ревью выполнено в GitHub Actions; код и тесты PR не исполнялись. "
+                      "Настройки модели и usage получены из аудита пайплайна, а не из настроек обычного чата.")
+            status, error = "completed", None
+        except Exception as failure:
+            # Не показываем raw HTTP body, текст credentials и секретные данные исключения.
+            error = str(failure) if isinstance(failure, ReviewError) else "Не удалось завершить GitHub-ревью. Проверьте подключение и состояние Actions."
+            state.update(phase="error", error=error)
+            progress(state)
+            status = "failed"
+            answer = error
+            technical = {"request_status": status, "github_review": state, "settings": settings.to_dict(),
+                         "configuration_source": source, "usage": normalize_token_usage(None)}
+        # Перечитываем диалог, чтобы длительное ожидание не затёрло изменения истории.
+        conversation = storage.get_conversation(conversation["id"])
+        for message in conversation["messages"]:
+            if message["id"] == user["id"]:
+                message["technical"]["request_status"] = status
+        append_tree_message(conversation, {"id": uuid.uuid4().hex, "exchange_id": exchange_id,
+            "role": "assistant", "content": answer, "created_at": now_iso(), "technical": technical}, parent_id=user["id"])
+        conversation = storage.save_conversation(conversation)
+        set_mcp_activity_phase(activity_id, "error" if error else "completed", error)
+        return jsonify({"ok": not error, "error": error, "conversation": with_token_totals(conversation)}), (502 if error else 200)
+
     @flask_app.post("/api/conversations/<conversation_id>/messages")
     def send_message(conversation_id: str):
         try:
@@ -2831,6 +2898,16 @@ def create_app(
         help_question = parse_help(content) if not automatic else None
         if help_question is not None:
             return send_developer_help(conversation, content, help_question, settings, source, mcp_activity_id)
+
+        if not automatic:
+            try:
+                review_target = review_intent(content)
+                if review_target is not None:
+                    return send_github_review(conversation, content, review_target, settings, source, mcp_activity_id)
+            except PermissionError:
+                return api_error("Запуск GitHub-ревью доступен только владельцу проекта/диалога.", 403)
+            except ReviewError as error:
+                return api_error(str(error), 400)
 
         exchange_id = uuid.uuid4().hex
         created_at = now_iso()
