@@ -869,6 +869,10 @@ function renderMessages() {
     const messageText = element.querySelector(".message-text");
     if (message.role === "assistant") ChatMarkdown.renderInto(messageText, message.content);
     else messageText.textContent = message.content;
+    if (message.role === "assistant" && message.technical?.github_review) {
+      element.querySelector("header strong").textContent = "DeepSeek · ревью GitHub PR";
+      element.querySelector(".message-body").append(createReviewPanel(message.technical.github_review));
+    }
     const ragAudit = message.technical?.rag;
     if (ragAudit?.enabled) {
       const badge = document.createElement("div");
@@ -1631,6 +1635,7 @@ async function sendMessageContent(content, { automatic = false } = {}) {
     try {
       const data = await api(`/api/mcp/activity/${activityId}`);
       renderLiveMcpActivity(pending[1], data.activity);
+      renderLiveReviewActivity(pending[1], data.activity?.review);
     } catch (error) {
       if (error.status !== 404) console.debug("MCP activity poll:", error.message);
     }
@@ -1645,7 +1650,7 @@ async function sendMessageContent(content, { automatic = false } = {}) {
     return false;
   } finally {
     polling = false; window.clearInterval(poll);
-    sending = false; setSendingState(false); pending.forEach((element) => element.remove()); ui.input.focus();
+    sending = false; setSendingState(false); renderTaskState(); pending.forEach((element) => element.remove()); ui.input.focus();
   }
 }
 
@@ -1745,6 +1750,90 @@ function renderLiveMcpActivity(waitingMessage, activity) {
   body.querySelector(".mcp-call-panel")?.remove();
   const panel = createMcpCallsPanel(activity?.calls || [], { live: true, phase: activity?.phase || "thinking" });
   if (panel) body.append(panel);
+}
+
+function reviewPhaseLabel(phase) {
+  return ({metadata: "Получение PR", diff: "Получение изменённых файлов и diff",
+    locating: "Поиск запуска для текущего коммита", queued: "Ожидание runner",
+    requested: "Запуск запрошен", waiting: "Ожидание GitHub Actions", pending: "Ожидание GitHub Actions",
+    in_progress: "Выполняется GitHub Actions", report: "Получение отчёта и проверка публикации",
+    completed: "Ревью завершено", error: "Ревью не завершено"})[phase] || "Получение состояния GitHub";
+}
+
+function createReviewPanel(review) {
+  const panel = document.createElement("section");
+  panel.className = "review-panel";
+  const title = document.createElement("strong");
+  title.textContent = `GitHub Actions · ${review.repo || "PR"}${review.number ? ` · PR #${review.number}` : ""}`;
+  const status = document.createElement("p"); status.className = "review-status";
+  status.textContent = reviewPhaseLabel(review.phase);
+  panel.append(title, status);
+  if (review.head) {
+    const head = document.createElement("p"); head.className = "review-head";
+    head.textContent = `Коммит ${review.head.slice(0, 12)}${review.attempt ? ` · попытка ${review.attempt}` : ""}`;
+    panel.append(head);
+  }
+  const links = document.createElement("p");
+  for (const [key, label] of [["pr_url", "Pull Request"], ["run_url", "Запуск Actions"], ["comment_url", "Комментарий бота"], ["artifact_url", "Отчёт и аудит"]]) {
+    if (!/^https:\/\/github\.com\//.test(review[key] || "")) continue;
+    const link = document.createElement("a"); link.href = review[key]; link.textContent = label;
+    link.target = "_blank"; link.rel = "noopener noreferrer";
+    if (links.childNodes.length) links.append(document.createTextNode(" · "));
+    links.append(link);
+  }
+  panel.append(links);
+  const steps = document.createElement("ol"); steps.className = "review-steps";
+  for (const step of review.steps || []) {
+    const row = document.createElement("li");
+    const icon = step.conclusion === "success" ? "✓" : step.conclusion === "failure" ? "✗" : step.status === "in_progress" ? "↻" : "·";
+    row.textContent = `${icon} ${step.name} — ${step.conclusion || step.status}`;
+    steps.append(row);
+  }
+  if (steps.childNodes.length) panel.append(steps);
+  const details = (label, key) => {
+    const node = document.createElement("details"); node.dataset.reviewSection = key;
+    const summary = document.createElement("summary"); summary.textContent = label;
+    node.append(summary); panel.append(node); return node;
+  };
+  if (review.files?.length) {
+    const list = document.createElement("ul");
+    for (const file of review.files) {
+      const row = document.createElement("li");
+      row.textContent = `${file.path} · +${file.additions} / −${file.deletions}${file.included ? "" : " · исключён из анализа"}`;
+      list.append(row);
+    }
+    details(`Изменённые файлы (${review.files.length})`, "files").append(list);
+    const diff = details("Посмотреть diff", "diff");
+    const note = document.createElement("p"); note.textContent = review.diff_note || "";
+    const code = document.createElement("pre"); code.textContent = review.diff || "Текстовый patch недоступен.";
+    diff.append(note, code);
+  }
+  if (review.sources?.length) {
+    const list = document.createElement("ul");
+    for (const source of review.sources) {
+      const row = document.createElement("li");
+      row.textContent = `${source.kind === "documentation" ? "Документация" : "Код"}: ${source.source}:${source.start_line}–${source.end_line} · BM25 ${source.score}`;
+      list.append(row);
+    }
+    details(`Источники RAG из аудита (${review.sources.length})`, "sources").append(list);
+  }
+  if (review.error) { const error = document.createElement("p"); error.className = "error"; error.textContent = review.error; panel.append(error); }
+  return panel;
+}
+
+function renderLiveReviewActivity(waitingMessage, review) {
+  if (!waitingMessage?.isConnected || !review) return;
+  const stamp = JSON.stringify(review);
+  if (waitingMessage.dataset.reviewStamp === stamp) return;
+  waitingMessage.dataset.reviewStamp = stamp;
+  const body = waitingMessage.querySelector(".message-body");
+  const old = body.querySelector(".review-panel");
+  const opened = new Set(Array.from(old?.querySelectorAll("details[open]") || []).map(node => node.dataset.reviewSection));
+  const panel = createReviewPanel(review);
+  panel.querySelectorAll("details").forEach(node => { node.open = opened.has(node.dataset.reviewSection); });
+  if (old) old.replaceWith(panel); else body.append(panel);
+  const thinking = body.querySelector(".thinking-line span");
+  if (thinking) thinking.textContent = reviewPhaseLabel(review.phase);
 }
 
 function setSendingState(active) {

@@ -1,5 +1,22 @@
 # Схемы данных ассистента
 
+## Дополнение дня 32: ревью GitHub в сообщении
+
+Schema version остаётся 3; поля добавляются совместимо. У запроса user
+`technical.review_request=true`. У ответа `technical.github_review` содержит
+repo, number, head, run_id, attempt, phase, steps, files, diff (предпросмотр
+до 60000 символов), diff_note, sources (метаданные BM25 без текста чанков),
+findings, comment_id, ссылки на PR/run/comment/artifact и api_calls.
+В api_calls сохраняются только метод, путь API, статус и время — без credentials.
+`technical.settings` и usage относятся к фактическому вызову модели в CI,
+`technical.chat_settings` сохраняет отдельно настройки, выбранные в интерфейсе.
+Неуспешная пара user/assistant имеет request_status=failed и не включается
+в будущий контекст. Review не создаёт summary/facts-ревизий и не меняет этап.
+
+Временный объект activity дополнен owner_profile_id и необязательным review
+с текущей карточкой. Чтение activity доступно только создавшему её профилю.
+Это данные в памяти процесса, не новое хранилище диалогов или MCP-вызов.
+
 ## JSON-диалоги: schema_version 3
 
 Источник схемы — storage.py: JsonStorage.create_conversation и методы нормализации.

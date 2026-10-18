@@ -17,6 +17,7 @@ RAG и MCP для project_id диалога. run.bat → main.py → свобо�
 | agent.py | AgentSettings, DeepSeekProvider, сборка контекста, tools и usage |
 | developer_help.py | Копии документации, справка и контекст RAG + Project MCP |
 | code_review.py | CLI-ревью Git diff, отдельный BM25 RAG кода/docs и общий DeepSeekProvider |
+| chat_review.py | Явные поручения ревью в чате, GitHub API, повторный запуск Actions, проверка artifact и комментария |
 | context_manager.py | full, summary, sliding, facts, дерево сообщений |
 | storage.py | JSON schema v3, профили, проекты, атомарное сохранение |
 | memory_manager.py, task_memory.py | Память пользователя/проекта и независимая память задачи |
@@ -102,4 +103,13 @@ DeepSeekProvider → валидация JSON/изменённых строк →
 чата и его индекс не используются. Workflow выключен без Repository variables,
 runner Windows self-hosted регистрируется отдельно. Локальная проверка —
 `test_code_review.py`, учебный diff — `scripts/day32_demo.py`.
-Ограничения, настройка и незавершённая проверка на реальном PR — DAY32_CODE_REVIEW.md.
+Ограничения, настройка и результаты проверки на реальном PR — DAY32_CODE_REVIEW.md.
+
+Поручение «Проверь PR №1» или «Сделай ревью URL» маршрутизируется app.py в
+ChatReviewService до обычной генерации. Репозиторий определяется origin рабочего
+проекта, повторное поручение использует последний успешный PR только активной
+ветки чата. Сервис получает файлы/diff, повторяет существующий ai-review.yml
+для текущего head (или ожидает уже идущий запуск), проверяет номер попытки,
+artifact, head и комментарий бота. Ответ сохраняет GitHub-аудит и usage CI.
+Состояние review передаётся через существующий /api/mcp/activity/<activity_id>,
+но не создаёт фиктивных MCP-вызовов. Приложение не меняет код/PR и не делает push/merge.
