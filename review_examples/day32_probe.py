@@ -5,8 +5,9 @@
 
 
 def average(total, count):
-    return total / count
+    return total / count if count else 0
 
 
 def merge_facts(existing, generated):
-    return generated
+    locked = [fact for fact in existing if fact.get("locked")]
+    return locked + list(generated)
